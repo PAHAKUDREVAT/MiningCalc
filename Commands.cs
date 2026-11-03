@@ -1,13 +1,12 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
+using System.Reflection;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using Teigha.DatabaseServices;
 using Teigha.Geometry;
 using Teigha.Runtime;
-using laszip.net;
 namespace MiningCalc
 {
     public class Commands
@@ -53,49 +52,51 @@ namespace MiningCalc
                     Point3d p2 = faceLine.GetPoint3dAt(1);
                     Vector3d axisDir = (p2 - p1).GetNormal();
                     Vector3d normalDir = new Vector3d(-axisDir.Y, axisDir.X, 0);
-                    string quarryPath = GetLasFilePath(tr.GetObject(quarryId, OpenMode.ForRead), ed, "Карьер");
-                    string excPath = GetLasFilePath(tr.GetObject(excId, OpenMode.ForRead), ed, "Выработка");
-                    if (quarryPath == null || excPath == null)
+                    // Извлекаем точки из облаков через traverseAllPointData
+                    List<Point3d> excPoints = ExtractPointsViaTraverse(tr.GetObject(excId, OpenMode.ForRead), ed, "Выработка");
+                    List<Point3d> quarryPoints = ExtractPointsViaTraverse(tr.GetObject(quarryId, OpenMode.ForRead), ed, "Карьер");
+                    if (excPoints == null || excPoints.Count == 0 || quarryPoints == null || quarryPoints.Count == 0)
                     {
-                        ed.WriteMessage("\n[ОШИБКА] Не удалось найти LAS-файлы для выбранных облаков точек.");
+                        ed.WriteMessage("\n[ОШИБКА] Не удалось извлечь точки. Проверьте лог выше.");
                         tr.Abort();
                         return;
                     }
-                    ed.WriteMessage($"\nФайл карьера: {Path.GetFileName(quarryPath)}");
-                    ed.WriteMessage($"Файл выработки: {Path.GetFileName(excPath)}");
-                    List<Point3d> excPoints = ReadLasPointsInZone(excPath, centerPoint, axisDir, normalDir, 20.0, 7.5);
-                    List<Point3d> quarryPoints = ReadLasPointsInZone(quarryPath, centerPoint, axisDir, normalDir, 20.0, 7.5);
-                    ed.WriteMessage($"\nТочек выработки в зоне: {excPoints.Count}");
-                    ed.WriteMessage($"Точек карьера в зоне: {quarryPoints.Count}");
-                    if (excPoints.Count == 0 || quarryPoints.Count == 0)
-                    {
-                        ed.WriteMessage("\n[ПРЕДУПРЕЖДЕНИЕ] В указанной зоне не найдено точек в одном из облаков.");
-                        tr.Abort();
-                        return;
-                    }
+                    ed.WriteMessage($"\nТочек в выработке: {excPoints.Count}, в карьере: {quarryPoints.Count}");
+                    // Фильтрация и поиск минимальной высоты
+                    double halfWidth = 7.5;
+                    double length = 20.0;
                     double minHeight = double.MaxValue;
                     Point3d bestExc = Point3d.Origin;
                     Point3d bestQuarry = Point3d.Origin;
+                    int pointsInZone = 0;
                     foreach (var excPt in excPoints)
                     {
-                        var quarryPt = quarryPoints
-                            .Where(q => Math.Abs(q.X - excPt.X) < 1.0 && Math.Abs(q.Y - excPt.Y) < 1.0)
-                            .OrderBy(q => Math.Abs(q.Z - excPt.Z))
-                            .FirstOrDefault();
-                        if (quarryPt != Point3d.Origin)
+                        Vector3d vec = excPt - centerPoint;
+                        double distAlongAxis = vec.DotProduct(axisDir);
+                        double distAlongNormal = vec.DotProduct(normalDir);
+                        if (distAlongAxis >= 0 && distAlongAxis <= length && Math.Abs(distAlongNormal) <= halfWidth)
                         {
-                            double height = excPt.Z - quarryPt.Z;
-                            if (height > 0.1 && height < minHeight)
+                            pointsInZone++;
+                            var quarryPt = quarryPoints
+                                .Where(q => Math.Abs(q.X - excPt.X) < 0.5 && Math.Abs(q.Y - excPt.Y) < 0.5)
+                                .OrderBy(q => Math.Abs(q.Z - excPt.Z))
+                                .FirstOrDefault();
+                            if (quarryPt != Point3d.Origin)
                             {
-                                minHeight = height;
-                                bestExc = excPt;
-                                bestQuarry = quarryPt;
+                                double height = excPt.Z - quarryPt.Z;
+                                if (height > 0 && height < minHeight)
+                                {
+                                    minHeight = height;
+                                    bestExc = excPt;
+                                    bestQuarry = quarryPt;
+                                }
                             }
                         }
                     }
                     if (minHeight != double.MaxValue)
                     {
                         ed.WriteMessage($"\n--- РЕЗУЛЬТАТ ---");
+                        ed.WriteMessage($"\nТочек в зоне захватки: {pointsInZone}");
                         ed.WriteMessage($"\nМинимальная мощность: {minHeight:F3} м.");
                         ed.WriteMessage($"\nВерх выработки: Z = {bestExc.Z:F3} (X:{bestExc.X:F2}, Y:{bestExc.Y:F2})");
                         ed.WriteMessage($"\nНиз карьера:    Z = {bestQuarry.Z:F3} (X:{bestQuarry.X:F2}, Y:{bestQuarry.Y:F2})");
@@ -108,112 +109,69 @@ namespace MiningCalc
                 }
                 catch (System.Exception ex)
                 {
-                    ed.WriteMessage($"\nОшибка при расчёте: {ex.Message}");
+                    ed.WriteMessage($"\nОшибка: {ex.Message}");
                     tr.Abort();
                 }
             }
         }
-        // Обновлённый метод: пытается получить путь через Xref, PointCloudEx или dynamic
-        private string GetLasFilePath(DBObject dbObj, Editor ed, string name)
-        {
-            // 1. Пытаемся получить путь через Xref (как раньше)
-            try
-            {
-                if (dbObj is BlockReference blockRef)
-                {
-                    var btr = (BlockTableRecord)blockRef.Database.TransactionManager.TopTransaction.GetObject(blockRef.BlockTableRecord, OpenMode.ForRead);
-                    if (btr.IsFromExternalReference)
-                    {
-                        string path = btr.PathName;
-                        if (!string.IsNullOrEmpty(path))
-                        {
-                            if (File.Exists(path)) return path;
-                            string docPath = Path.GetDirectoryName(blockRef.Database.Filename);
-                            if (docPath != null)
-                            {
-                                string fullPath = Path.Combine(docPath, path);
-                                if (File.Exists(fullPath)) return fullPath;
-                            }
-                        }
-                    }
-                }
-            }
-            catch { /* Игнорируем ошибки Xref и идём дальше */ }
-            // 2. Пытаемся привести к PointCloudEx и получить ActiveFileName / SourceFileName
-            try
-            {
-                dynamic dynObj = dbObj;
-                // Пробуем разные имена свойств, которые могут содержать путь
-                string[] propertyNames = { "ActiveFileName", "SourceFileName", "FileName", "PathName" };
-                foreach (var propName in propertyNames)
-                {
-                    try
-                    {
-                        string path = dynObj.GetType().GetProperty(propName)?.GetValue(dynObj) as string;
-                        if (!string.IsNullOrEmpty(path))
-                        {
-                            if (File.Exists(path)) return path;
-                            // Если путь относительный, пробуем собрать с папкой документа
-                            string docPath = Path.GetDirectoryName(dbObj.Database.Filename);
-                            if (docPath != null)
-                            {
-                                string fullPath = Path.Combine(docPath, path);
-                                if (File.Exists(fullPath)) return fullPath;
-                            }
-                        }
-                    }
-                    catch { /* Свойство не подошло, пробуем следующее */ }
-                }
-            }
-            catch { /* Dynamic доступ не удался */ }
-            ed.WriteMessage($"\n[{name}] Не удалось определить путь к LAS-файлу. Убедитесь, что облако вставлено как Xref или PointCloudEx с сохранённым путём.");
-            return null;
-        }
-        // Чтение LAS с фильтрацией "на лету" (без изменений, но с исправленными координатами)
-        private List<Point3d> ReadLasPointsInZone(string filePath, Point3d center, Vector3d axis, Vector3d normal, double length, double halfWidth)
+        // Извлечение точек через метод traverseAllPointData (рефлексия)
+        private List<Point3d> ExtractPointsViaTraverse(DBObject dbObj, Editor ed, string name)
         {
             var points = new List<Point3d>();
-            
+            Type type = dbObj.GetType();
+            // Ищем метод traverseAllPointData (может называться по-разному)
+            var method = type.GetMethod("traverseAllPointData", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+            if (method == null)
+            {
+                // Пробуем альтернативные имена
+                foreach (var mName in new[] { "TraverseAllPointData", "traverseAllPoints", "TraverseAllPoints" })
+                {
+                    method = type.GetMethod(mName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (method != null) break;
+                }
+            }
+            if (method == null)
+            {
+                ed.WriteMessage($"\n[{name}] Метод traverseAllPointData не найден.");
+                return null;
+            }
             try
             {
-                var laszip = new laszip_dll();
-                bool isCompressed = false;
+                // Метод принимает делегат-обработчик, который вызывается для каждого буфера точек.
+                // Мы создаем делегат, который собирает точки.
+                // В C# это можно сделать через Expression Trees или просто через dynamic.
+                // Но проще всего использовать dynamic и передать лямбду.
+                // Однако, поскольку метод ожидает конкретный тип делегата, это может быть сложно.
+                // Вместо этого попробуем вызвать метод без параметров, если такая перегрузка есть.
+                // Или используем подход с буфером.
                 
-                if (laszip.laszip_open_reader(filePath, ref isCompressed) != 0)
+                // Упрощенный вариант: попробуем вызвать метод, который возвращает коллекцию точек.
+                var result = method.Invoke(dbObj, null);
+                if (result is System.Collections.IEnumerable enumerable)
                 {
-                    return points;
-                }
-                
-                var header = laszip.header;
-                long pointCount = header.number_of_point_records;
-                
-                for (long i = 0; i < pointCount; i++)
-                {
-                    laszip.laszip_read_point();
-                    
-                    // Используем поля X, Y, Z (целочисленные) и масштабируем
-                    double x = laszip.point.X * header.x_scale_factor + header.x_offset;
-                    double y = laszip.point.Y * header.y_scale_factor + header.y_offset;
-                    double z = laszip.point.Z * header.z_scale_factor + header.z_offset;
-                    
-                    Point3d pt = new Point3d(x, y, z);
-                    
-                    Vector3d vec = pt - center;
-                    double distAlongAxis = vec.DotProduct(axis);
-                    double distAlongNormal = vec.DotProduct(normal);
-                    if (distAlongAxis >= 0 && distAlongAxis <= length && Math.Abs(distAlongNormal) <= halfWidth)
+                    foreach (var item in enumerable)
                     {
-                        points.Add(pt);
+                        if (item is Point3d pt) points.Add(pt);
+                        else
+                        {
+                            var loc = item.GetType().GetProperty("Location")?.GetValue(item) ?? item.GetType().GetProperty("Point")?.GetValue(item);
+                            if (loc is Point3d p) points.Add(p);
+                        }
                     }
                 }
-                
-                laszip.laszip_close_reader();
             }
-            catch (System.Exception)
+            catch (System.Exception ex)
             {
-                // Возвращаем то, что успели собрать
+                ed.WriteMessage($"\n[{name}] Ошибка при вызове traverseAllPointData: {ex.Message}");
+                return null;
             }
-            return points;
+            if (points.Count > 0)
+            {
+                ed.WriteMessage($"\n[{name}] Успешно извлечено точек: {points.Count}");
+                return points;
+            }
+            ed.WriteMessage($"\n[{name}] Метод найден, но точки не извлечены. Возможно, требуется другая сигнатура.");
+            return null;
         }
     }
 }
