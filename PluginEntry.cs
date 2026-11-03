@@ -2,7 +2,6 @@ using System;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using Teigha.Runtime;
-
 namespace MiningCalc
 {
     public class PluginEntry : IExtensionApplication
@@ -11,7 +10,7 @@ namespace MiningCalc
         {
             try
             {
-                Document doc = Application.DocumentManager.MdiActiveDocument;
+                Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
                 if (doc != null)
                 {
                     Editor ed = doc.Editor;
@@ -19,7 +18,7 @@ namespace MiningCalc
                     ed.WriteMessage("\nПлагин успешно загружен. Введите SURVEY для запуска.");
                 }
             }
-            catch (Exception ex)
+            catch (System.Exception ex)
             {
                 System.Windows.Forms.MessageBox.Show(
                     $"Ошибка инициализации плагина:\n{ex.Message}\n\nСтек:\n{ex.StackTrace}", 
@@ -28,7 +27,6 @@ namespace MiningCalc
                     System.Windows.Forms.MessageBoxIcon.Error);
             }
         }
-
         public void Terminate() { }
     }
 }
