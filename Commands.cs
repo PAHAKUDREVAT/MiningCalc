@@ -183,9 +183,9 @@ namespace MiningCalc
                     laszip.laszip_read_point();
                     
                     // Применяем масштаб и смещение
-                    double x = laszip.point.coordinates[0] * header.x_scale_factor + header.x_offset;
-                    double y = laszip.point.coordinates[1] * header.y_scale_factor + header.y_offset;
-                    double z = laszip.point.coordinates[2] * header.z_scale_factor + header.z_offset;
+                    double x = laszip.point.X * header.x_scale_factor + header.x_offset;
+                    double y = laszip.point.Y * header.y_scale_factor + header.y_offset;
+                    double z = laszip.point.Z * header.z_scale_factor + header.z_offset;
                     
                     Point3d pt = new Point3d(x, y, z);
                     
