@@ -3,7 +3,6 @@ using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using Teigha.DatabaseServices;
 using Teigha.Runtime;
-using HostMgd.PointClouds;
 
 namespace MiningCalc
 {
@@ -17,15 +16,15 @@ namespace MiningCalc
 
             try
             {
-                // 1. Выбор облака точек
+                // 1. Выбор облака точек (разрешаем любой Entity)
                 PromptEntityOptions peoCloud = new PromptEntityOptions("\nВыберите облако точек карьера: ");
-                peoCloud.SetRejectMessage("\nЭто не облако точек.");
-                peoCloud.AddAllowedClass(typeof(PointCloudInsertion), true);
+                peoCloud.SetRejectMessage("\nЭто не объект чертежа.");
+                peoCloud.AddAllowedClass(typeof(Entity), true);
 
                 PromptEntityResult perCloud = ed.GetEntity(peoCloud);
                 if (perCloud.Status != PromptStatus.OK) return;
 
-                // 2. Выбор линии горизонта
+                // 2. Выбор линии горизонта (полилинии)
                 PromptEntityOptions peoLine = new PromptEntityOptions("\nВыберите линию на слое горизонта: ");
                 peoLine.SetRejectMessage("\nНеобходимо выбрать полилинию.");
                 peoLine.AddAllowedClass(typeof(Polyline), false);
@@ -33,7 +32,7 @@ namespace MiningCalc
                 PromptEntityResult perLine = ed.GetEntity(peoLine);
                 if (perLine.Status != PromptStatus.OK) return;
 
-                // Выполнение
+                // 3. Выполнение расчёта
                 ExecuteCalculation(doc, perCloud.ObjectId, perLine.ObjectId);
             }
             catch (Exception ex)
@@ -51,5 +50,5 @@ namespace MiningCalc
             {
                 try
                 {
+                    // Получаем полилинию
                     Polyline poly = (Polyline)tr.GetObject(lineId, OpenMode.ForRead);
-                    PointCloudInsertion cloud = (PointCloudIn
