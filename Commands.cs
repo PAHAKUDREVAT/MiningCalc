@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.IO;
-using System.Globalization;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using Teigha.DatabaseServices;
@@ -61,14 +59,11 @@ namespace MiningCalc
                     // 2. Получение точек из облаков
                     Entity excEntity = (Entity)tr.GetObject(excId, OpenMode.ForRead);
                     Entity quarryEntity = (Entity)tr.GetObject(quarryId, OpenMode.ForRead);
-                    // Попытка извлечь точки напрямую через динамический API
-                    List<Point3d> excPoints = TryGetPointsFromEntity(excEntity, ed);
-                    List<Point3d> quarryPoints = TryGetPointsFromEntity(quarryEntity, ed);
-                    // Если не удалось, предлагаем экспорт
+                    List<Point3d>? excPoints = TryGetPointsFromEntity(excEntity, ed);
+                    List<Point3d>? quarryPoints = TryGetPointsFromEntity(quarryEntity, ed);
                     if (excPoints == null || quarryPoints == null)
                     {
                         ed.WriteMessage("\n[ПРЕДУПРЕЖДЕНИЕ] Не удалось автоматически извлечь точки из облаков.");
-                        ed.WriteMessage("\nСОВЕТ: Выполните команду _POINTCLOUDEXTRACT, сохраните точки в CSV и загрузите в плагин (пока не реализовано).");
                         tr.Abort();
                         return;
                     }
@@ -80,7 +75,6 @@ namespace MiningCalc
                     Point3d bestExc = Point3d.Origin;
                     Point3d bestQuarry = Point3d.Origin;
                     int pointsInZone = 0;
-                    // Для каждой точки выработки в зоне
                     foreach (var excPt in excPoints)
                     {
                         Vector3d vec = excPt - centerPoint;
@@ -129,16 +123,11 @@ namespace MiningCalc
                 }
             }
         }
-        /// <summary>
-        /// Пытается извлечь список точек из объекта облака через dynamic API.
-        /// Возвращает null, если API не поддерживается.
-        /// </summary>
-        private List<Point3d> TryGetPointsFromEntity(Entity ent, Editor ed)
+        private List<Point3d>? TryGetPointsFromEntity(Entity ent, Editor ed)
         {
             try
             {
                 dynamic dynEnt = ent;
-                // Попытка вызвать метод GetPoints() (может отличаться в зависимости от версии)
                 var points = dynEnt.GetPoints();
                 if (points != null)
                 {
@@ -150,11 +139,10 @@ namespace MiningCalc
                     return result;
                 }
             }
-            catch (Exception ex)
+            catch (System.Exception ex)
             {
-                ed.WriteMessage($"\n[DEBUG] Ошибка извлечения точек: {ex.Message}");
+                ed.WriteMessage($"\n[DEBUG] Ошибка извлечения точек (GetPoints): {ex.Message}");
             }
-            // Попытка через свойство Points
             try
             {
                 dynamic dynEnt = ent;
@@ -169,9 +157,9 @@ namespace MiningCalc
                     return result;
                 }
             }
-            catch
+            catch (System.Exception ex)
             {
-                // Игнорируем, если свойство отсутствует
+                ed.WriteMessage($"\n[DEBUG] Ошибка извлечения точек (Points): {ex.Message}");
             }
             return null;
         }
