@@ -2,6 +2,7 @@ using System;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using Teigha.Runtime;
+using System.Windows.Forms;
 namespace MiningCalc
 {
     public class PluginEntry : IExtensionApplication
@@ -10,21 +11,22 @@ namespace MiningCalc
         {
             try
             {
+                // Первое окно: доказывает, что DLL загрузилась
+                MessageBox.Show("Плагин начал загрузку!", "Тест", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
                 if (doc != null)
                 {
                     Editor ed = doc.Editor;
                     ed.WriteMessage("\n=== Маркшейдерский калькулятор v2.1 (nanoCAD 25+) ===");
-                    ed.WriteMessage("\nПлагин успешно загружен. Введите SURVEY для запуска.");
                 }
+                
+                // Второе окно: доказывает, что инициализация прошла без ошибок
+                MessageBox.Show("Плагин успешно инициализирован! Теперь введите SURVEY.", "Успех", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (System.Exception ex)
             {
-                System.Windows.Forms.MessageBox.Show(
-                    $"Ошибка инициализации плагина:\n{ex.Message}\n\nСтек:\n{ex.StackTrace}", 
-                    "MiningCalc Error", 
-                    System.Windows.Forms.MessageBoxButtons.OK, 
-                    System.Windows.Forms.MessageBoxIcon.Error);
+                // Если внутри что-то падает, мы это увидим
+                MessageBox.Show($"ОШИБКА: {ex.Message}\n\nСтек:\n{ex.StackTrace}", "Ошибка плагина", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
         public void Terminate() { }
