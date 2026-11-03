@@ -14,9 +14,8 @@ namespace MiningCalc
             Editor ed = doc.Editor;
             try
             {
+                // Убрали AddAllowedClass, теперь можно выбрать любой объект
                 PromptEntityOptions peoCloud = new PromptEntityOptions("\nВыберите облако точек карьера: ");
-                peoCloud.SetRejectMessage("\nЭто не объект чертежа.");
-                peoCloud.AddAllowedClass(typeof(Entity), true);
                 PromptEntityResult perCloud = ed.GetEntity(peoCloud);
                 if (perCloud.Status != PromptStatus.OK) return;
                 PromptEntityOptions peoLine = new PromptEntityOptions("\nВыберите линию на слое горизонта: ");
@@ -40,12 +39,23 @@ namespace MiningCalc
                 try
                 {
                     Polyline poly = (Polyline)tr.GetObject(lineId, OpenMode.ForRead);
-                    Entity cloudEntity = (Entity)tr.GetObject(cloudId, OpenMode.ForRead);
+                    
+                    // Получаем объект как DBObject (базовый для всего)
+                    DBObject cloudObj = tr.GetObject(cloudId, OpenMode.ForRead);
                     ed.WriteMessage("\n--- Анализ данных ---");
-                    ed.WriteMessage($"\nТип выбранного объекта: {cloudEntity.GetType().Name}");
+                    // ВАЖНО: Выведем полное имя класса объекта, чтобы узнать, как он называется в API
+                    ed.WriteMessage($"\nТип выбранного объекта: {cloudObj.GetType().FullName}");
                     ed.WriteMessage($"\nВершин в линии: {poly.NumberOfVertices}");
-                    dynamic cloud = cloudEntity;
-                    ed.WriteMessage("\nОблако точек успешно получено (динамический доступ).");
+                    // Пробуем привести к Entity (вдруг сработает)
+                    if (cloudObj is Entity cloudEntity)
+                    {
+                        dynamic cloud = cloudEntity;
+                        ed.WriteMessage("\nОблако точек успешно получено.");
+                    }
+                    else
+                    {
+                        ed.WriteMessage("\nВыбранный объект не является Entity, но мы его прочитали!");
+                    }
                     ExcavationResult result = new ExcavationResult
                     {
                         RoofZ = 100.0,
