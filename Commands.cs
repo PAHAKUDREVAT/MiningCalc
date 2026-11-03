@@ -10,7 +10,7 @@ namespace MiningCalc
         [CommandMethod("SURVEY")]
         public void RunSurvey()
         {
-            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
             try
             {
@@ -26,7 +26,7 @@ namespace MiningCalc
                 if (perLine.Status != PromptStatus.OK) return;
                 ExecuteCalculation(doc, perCloud.ObjectId, perLine.ObjectId);
             }
-            catch (Exception ex)
+            catch (System.Exception ex)
             {
                 ed.WriteMessage($"\n[ОШИБКА] {ex.Message}");
             }
@@ -57,7 +57,7 @@ namespace MiningCalc
                     
                     tr.Commit();
                 }
-                catch (Exception ex)
+                catch (System.Exception ex)
                 {
                     ed.WriteMessage($"\nОшибка при расчёте: {ex.Message}");
                     tr.Abort();
