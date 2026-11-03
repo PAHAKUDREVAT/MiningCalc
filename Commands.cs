@@ -6,6 +6,7 @@ using HostMgd.EditorInput;
 using Teigha.DatabaseServices;
 using Teigha.Geometry;
 using Teigha.Runtime;
+using HostMgd.PointClouds;
 namespace MiningCalc
 {
     public class Commands
@@ -17,20 +18,20 @@ namespace MiningCalc
             Editor ed = doc.Editor;
             try
             {
-                // 1. Выбор облака карьера
+                // 1. Облако карьера
                 var peoQuarry = new PromptEntityOptions("\nВыберите облако точек КАРЬЕРА: ");
                 var perQuarry = ed.GetEntity(peoQuarry);
                 if (perQuarry.Status != PromptStatus.OK) return;
-                // 2. Выбор облака выработки
+                // 2. Облако выработки
                 var peoExc = new PromptEntityOptions("\nВыберите облако точек ВЫРАБОТКИ: ");
                 var perExc = ed.GetEntity(peoExc);
                 if (perExc.Status != PromptStatus.OK) return;
-                // 3. Выбор линии забоя
+                // 3. Линия забоя
                 var peoLine = new PromptEntityOptions("\nВыберите линию ЗАБОЯ: ");
                 peoLine.AddAllowedClass(typeof(Polyline), false);
                 var perLine = ed.GetEntity(peoLine);
                 if (perLine.Status != PromptStatus.OK) return;
-                // 4. Указание точки выпуска
+                // 4. Точка выпуска
                 var ppoCenter = new PromptPointOptions("\nУкажите точку выпуска (центр захватки): ");
                 var pprCenter = ed.GetPoint(ppoCenter);
                 if (pprCenter.Status != PromptStatus.OK) return;
@@ -50,25 +51,26 @@ namespace MiningCalc
                 try
                 {
                     ed.WriteMessage("\n--- Анализ данных ---");
-                    // 1. Построение вектора оси забоя
+                    // 1. Вектор оси забоя
                     var faceLine = (Polyline)tr.GetObject(lineId, OpenMode.ForRead);
                     Point3d p1 = faceLine.GetPoint3dAt(0);
                     Point3d p2 = faceLine.GetPoint3dAt(1);
                     Vector3d axisDir = (p2 - p1).GetNormal();
                     Vector3d normalDir = new Vector3d(-axisDir.Y, axisDir.X, 0);
-                    // 2. Получение точек из облаков
+                    // 2. Получение облаков
                     Entity excEntity = (Entity)tr.GetObject(excId, OpenMode.ForRead);
                     Entity quarryEntity = (Entity)tr.GetObject(quarryId, OpenMode.ForRead);
-                    List<Point3d>? excPoints = TryGetPointsFromEntity(excEntity, ed);
-                    List<Point3d>? quarryPoints = TryGetPointsFromEntity(quarryEntity, ed);
-                    if (excPoints == null || quarryPoints == null)
+                    // 3. Извлечение точек
+                    List<Point3d> excPoints = TryGetPointsFromEntity(excEntity, ed, "Выработка");
+                    List<Point3d> quarryPoints = TryGetPointsFromEntity(quarryEntity, ed, "Карьер");
+                    if (excPoints == null || quarryPoints == null || excPoints.Count == 0 || quarryPoints.Count == 0)
                     {
-                        ed.WriteMessage("\n[ПРЕДУПРЕЖДЕНИЕ] Не удалось автоматически извлечь точки из облаков.");
+                        ed.WriteMessage("\n[ПРЕДУПРЕЖДЕНИЕ] Не удалось извлечь точки. Проверьте лог выше.");
                         tr.Abort();
                         return;
                     }
                     ed.WriteMessage($"\nТочек в выработке: {excPoints.Count}, в карьере: {quarryPoints.Count}");
-                    // 3. Фильтрация и поиск минимальной высоты
+                    // 4. Фильтрация и поиск минимальной высоты
                     double halfWidth = 7.5;
                     double length = 20.0;
                     double minHeight = double.MaxValue;
@@ -80,11 +82,11 @@ namespace MiningCalc
                         Vector3d vec = excPt - centerPoint;
                         double distAlongAxis = vec.DotProduct(axisDir);
                         double distAlongNormal = vec.DotProduct(normalDir);
-                        // Проверка попадания в зону 15х20
+                        // Проверка попадания в зону (0..20м вглубь и -7.5..7.5м в стороны)
                         if (distAlongAxis >= 0 && distAlongAxis <= length && Math.Abs(distAlongNormal) <= halfWidth)
                         {
                             pointsInZone++;
-                            // Поиск ближайшей точки карьера по XY
+                            // Поиск ближайшей точки карьера по XY (допуск 30 см)
                             var quarryPt = quarryPoints
                                 .Where(q => Math.Abs(q.X - excPt.X) < 0.3 && Math.Abs(q.Y - excPt.Y) < 0.3)
                                 .OrderBy(q => Math.Abs(q.Z - excPt.Z))
@@ -92,6 +94,7 @@ namespace MiningCalc
                             if (quarryPt != Point3d.Origin)
                             {
                                 double height = excPt.Z - quarryPt.Z;
+                                // Ищем САМУЮ МАЛУЮ положительную высоту
                                 if (height > 0 && height < minHeight)
                                 {
                                     minHeight = height;
@@ -101,7 +104,7 @@ namespace MiningCalc
                             }
                         }
                     }
-                    // 4. Вывод результатов
+                    // 5. Вывод
                     if (minHeight != double.MaxValue)
                     {
                         ed.WriteMessage($"\n--- РЕЗУЛЬТАТ ---");
@@ -123,43 +126,71 @@ namespace MiningCalc
                 }
             }
         }
-        private List<Point3d>? TryGetPointsFromEntity(Entity ent, Editor ed)
+        // МЕТОД ИЗВЛЕЧЕНИЯ ТОЧЕК (с поддержкой новых API)
+        private List<Point3d> TryGetPointsFromEntity(Entity ent, Editor ed, string cloudName)
         {
+            var result = new List<Point3d>();
+            // Вариант 1: Современный API через getPointCloudDataList
             try
             {
                 dynamic dynEnt = ent;
-                var points = dynEnt.GetPoints();
-                if (points != null)
+                dynamic dataList = dynEnt.getPointCloudDataList();
+                
+                if (dataList != null)
                 {
-                    var result = new List<Point3d>();
-                    foreach (var p in points)
+                    foreach (var item in dataList)
                     {
-                        result.Add((Point3d)p);
+                        try { result.Add((Point3d)item.Location); }
+                        catch { result.Add((Point3d)item.LocationPoint); }
                     }
-                    return result;
+                    if (result.Count > 0)
+                    {
+                        ed.WriteMessage($"\n[{cloudName}] Успешно извлечено точек через getPointCloudDataList: {result.Count}");
+                        return result;
+                    }
                 }
             }
             catch (System.Exception ex)
             {
-                ed.WriteMessage($"\n[DEBUG] Ошибка извлечения точек (GetPoints): {ex.Message}");
+                ed.WriteMessage($"\n[{cloudName}] Вариант 1 (getPointCloudDataList) не сработал: {ex.Message}");
             }
+            // Вариант 2: Старый API через GetPoints
             try
             {
                 dynamic dynEnt = ent;
-                var points = dynEnt.Points;
+                dynamic points = dynEnt.GetPoints();
                 if (points != null)
                 {
-                    var result = new List<Point3d>();
-                    foreach (var p in points)
+                    foreach (var p in points) result.Add((Point3d)p);
+                    if (result.Count > 0)
                     {
-                        result.Add((Point3d)p);
+                        ed.WriteMessage($"\n[{cloudName}] Успешно извлечено точек через GetPoints: {result.Count}");
+                        return result;
                     }
-                    return result;
                 }
             }
             catch (System.Exception ex)
             {
-                ed.WriteMessage($"\n[DEBUG] Ошибка извлечения точек (Points): {ex.Message}");
+                ed.WriteMessage($"\n[{cloudName}] Вариант 2 (GetPoints) не сработал: {ex.Message}");
+            }
+            // Вариант 3: Через свойство Points
+            try
+            {
+                dynamic dynEnt = ent;
+                dynamic points = dynEnt.Points;
+                if (points != null)
+                {
+                    foreach (var p in points) result.Add((Point3d)p);
+                    if (result.Count > 0)
+                    {
+                        ed.WriteMessage($"\n[{cloudName}] Успешно извлечено точек через Points: {result.Count}");
+                        return result;
+                    }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage($"\n[{cloudName}] Вариант 3 (Points) не сработал: {ex.Message}");
             }
             return null;
         }
