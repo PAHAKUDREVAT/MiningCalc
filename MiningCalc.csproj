@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <!-- Официальный пакет API для nanoCAD 25 -->
-    <PackageReference Include="ModPlus.nanoCAD.API.25" Version="2.0.0" />
+    <PackageReference Include="ModPlus.nanoCAD.API.25" Version="3.0.0" />
   </ItemGroup>
 
 </Project>
