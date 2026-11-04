@@ -96,17 +96,17 @@ namespace MiningCalc
                     // --- Обрезка и извлечение для ВЫРАБОТКИ ---
                     ed.SetImpliedSelection(new ObjectId[] { excId });
                     ed.Command("_.NPC_CLIP_FENCE", p1_s, p2_s, p3_s, p4_s, "");
-                    
-                    // Передаем ObjectId облака для выбора
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", excId);
-                    newExcId = GetLastCreatedEntityId(db, typeof(PointCloudEx));
+                    
+                    // Ищем последнее созданное облако (по имени типа)
+                    newExcId = GetLastCreatedPointCloudId(db);
 
                     // --- Обрезка и извлечение для КАРЬЕРА ---
                     ed.SetImpliedSelection(new ObjectId[] { quarryId });
                     ed.Command("_.NPC_CLIP_FENCE", p1_l, p2_l, p3_l, p4_l, "");
-                    
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", quarryId);
-                    newQuarryId = GetLastCreatedEntityId(db, typeof(PointCloudEx));
+                    
+                    newQuarryId = GetLastCreatedPointCloudId(db);
 
                     // Удаляем временные полилинии
                     using (Transaction trDel = db.TransactionManager.StartTransaction())
@@ -118,7 +118,7 @@ namespace MiningCalc
 
                     if (newExcId == ObjectId.Null || newQuarryId == ObjectId.Null)
                     {
-                        ed.WriteMessage("\n[ОШИБКА] Не удалось извлечь новые облака.");
+                        ed.WriteMessage("\n[ОШИБКА] Не удалось извлечь новые облака. Возможно, в зоне нет точек.");
                         return;
                     }
 
@@ -166,8 +166,8 @@ namespace MiningCalc
             }
         }
 
-        // Поиск последнего созданного объекта заданного типа
-        private ObjectId GetLastCreatedEntityId(Database db, Type targetType)
+        // Поиск последнего созданного облака точек по имени типа
+        private ObjectId GetLastCreatedPointCloudId(Database db)
         {
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
@@ -180,7 +180,8 @@ namespace MiningCalc
                     try
                     {
                         var ent = (Entity)tr.GetObject(id, OpenMode.ForRead);
-                        if (targetType.IsAssignableFrom(ent.GetType()) && ent.Handle.Value > maxHandle)
+                        // Проверяем, что в названии класса есть "PointCloud"
+                        if (ent.GetType().Name.Contains("PointCloud") && ent.Handle.Value > maxHandle)
                         {
                             maxHandle = ent.Handle.Value;
                             lastId = id;
