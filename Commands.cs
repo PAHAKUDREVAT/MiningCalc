@@ -8,6 +8,7 @@ using System.Globalization;
 using System.Text;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
+using HostMgd.Windows;
 using Teigha.DatabaseServices;
 using Teigha.Geometry;
 using Teigha.Runtime;
