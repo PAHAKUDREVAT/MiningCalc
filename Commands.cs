@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Reflection;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using Teigha.DatabaseServices;
@@ -11,13 +9,14 @@ namespace MiningCalc
 {
     public class Commands
     {
-        [CommandMethod("SURVEY")]
-        public void RunSurvey()
+        [CommandMethod("SURVEY_MIN")]
+        public void RunSurveyMin()
         {
             Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
             try
             {
+                // 1. Выбор объектов
                 var peoQuarry = new PromptEntityOptions("\nВыберите облако точек КАРЬЕРА: ");
                 var perQuarry = ed.GetEntity(peoQuarry);
                 if (perQuarry.Status != PromptStatus.OK) return;
@@ -28,150 +27,145 @@ namespace MiningCalc
                 peoLine.AddAllowedClass(typeof(Polyline), false);
                 var perLine = ed.GetEntity(peoLine);
                 if (perLine.Status != PromptStatus.OK) return;
-                var ppoCenter = new PromptPointOptions("\nУкажите точку выпуска (центр захватки): ");
-                var pprCenter = ed.GetPoint(ppoCenter);
-                if (pprCenter.Status != PromptStatus.OK) return;
-                ExecuteCalculation(doc, perQuarry.ObjectId, perExc.ObjectId, perLine.ObjectId, pprCenter.Value);
+                // 2. Цикл по точкам выпуска
+                while (true)
+                {
+                    var ppoFace = new PromptPointOptions("\nТочка выпуска на ЛИНИИ ЗАБОЯ (Enter для выхода): ");
+                    ppoFace.AllowNone = true;
+                    var pprFace = ed.GetPoint(ppoFace);
+                    
+                    if (pprFace.Status != PromptStatus.OK) break;
+                    Point3d ptFace = pprFace.Value;
+                    var ppoInward = new PromptPointOptions("\nУкажите точку ВНУТРИ выработки (направление): ");
+                    ppoInward.UseBasePoint = true;
+                    ppoInward.BasePoint = ptFace;
+                    var pprInward = ed.GetPoint(ppoInward);
+                    
+                    if (pprInward.Status != PromptStatus.OK) break;
+                    Point3d ptInward = pprInward.Value;
+                    // Запускаем расчет
+                    ExecuteCalculation(doc, perQuarry.ObjectId, perExc.ObjectId, ptFace, ptInward);
+                }
             }
             catch (System.Exception ex)
             {
                 ed.WriteMessage($"\n[ОШИБКА] {ex.Message}");
             }
         }
-        private void ExecuteCalculation(Document doc, ObjectId quarryId, ObjectId excId, ObjectId lineId, Point3d centerPoint)
+        private void ExecuteCalculation(Document doc, ObjectId quarryId, ObjectId excId, Point3d ptFace, Point3d ptInward)
         {
             Editor ed = doc.Editor;
             Database db = doc.Database;
-            using (var tr = db.TransactionManager.StartTransaction())
+            // Вычисляем направление
+            Vector3d vFwd = (ptInward - ptFace).GetNormal();
+            Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0);
+            // Рамка для выработки (15х1) - для фиксации верха
+            Point3d p1_s = ptFace + vSide * -7.5;
+            Point3d p2_s = ptFace + vSide * 7.5;
+            Point3d p3_s = p2_s + vFwd * 1.0;
+            Point3d p4_s = p1_s + vFwd * 1.0;
+            // Рамка для карьера (15х20) - для поиска минимума
+            Point3d p1_l = ptFace + vSide * -7.5;
+            Point3d p2_l = ptFace + vSide * 7.5;
+            Point3d p3_l = p2_l + vFwd * 20.0;
+            Point3d p4_l = p1_l + vFwd * 20.0;
+            using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 try
                 {
-                    ed.WriteMessage("\n--- Анализ данных ---");
-                    var faceLine = (Polyline)tr.GetObject(lineId, OpenMode.ForRead);
-                    Point3d p1 = faceLine.GetPoint3dAt(0);
-                    Point3d p2 = faceLine.GetPoint3dAt(1);
-                    Vector3d axisDir = (p2 - p1).GetNormal();
-                    Vector3d normalDir = new Vector3d(-axisDir.Y, axisDir.X, 0);
-                    // Извлекаем точки из облаков через traverseAllPointData
-                    List<Point3d> excPoints = ExtractPointsViaTraverse(tr.GetObject(excId, OpenMode.ForRead), ed, "Выработка");
-                    List<Point3d> quarryPoints = ExtractPointsViaTraverse(tr.GetObject(quarryId, OpenMode.ForRead), ed, "Карьер");
-                    if (excPoints == null || excPoints.Count == 0 || quarryPoints == null || quarryPoints.Count == 0)
+                    var btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+                    // Создаем временные рамки
+                    Polyline pline_s = CreatePolyline(p1_s, p2_s, p3_s, p4_s);
+                    btr.AppendEntity(pline_s);
+                    tr.AddNewlyCreatedDBObject(pline_s, true);
+                    Polyline pline_l = CreatePolyline(p1_l, p2_l, p3_l, p4_l);
+                    btr.AppendEntity(pline_l);
+                    tr.AddNewlyCreatedDBObject(pline_l, true);
+                    tr.Commit();
+                    // 3. СИНХРОННАЯ ОБРЕЗКА (ждем завершения)
+                    ed.WriteMessage("\n[1] Обрезка облаков...");
+                    // Вызываем команду через Editor.Command, которая блокирует поток до завершения
+                    ed.Command("_.NPC_CROP", excId, "", pline_s.ObjectId, "");
+                    ed.Command("_.NPC_CROP", quarryId, "", pline_l.ObjectId, "");
+                    // Удаляем временные рамки
+                    using (Transaction trDel = db.TransactionManager.StartTransaction())
                     {
-                        ed.WriteMessage("\n[ОШИБКА] Не удалось извлечь точки. Проверьте лог выше.");
-                        tr.Abort();
-                        return;
+                        var p_s = (Polyline)trDel.GetObject(pline_s.ObjectId, OpenMode.ForWrite);
+                        p_s.Erase();
+                        var p_l = (Polyline)trDel.GetObject(pline_l.ObjectId, OpenMode.ForWrite);
+                        p_l.Erase();
+                        trDel.Commit();
                     }
-                    ed.WriteMessage($"\nТочек в выработке: {excPoints.Count}, в карьере: {quarryPoints.Count}");
-                    // Фильтрация и поиск минимальной высоты
-                    double halfWidth = 7.5;
-                    double length = 20.0;
-                    double minHeight = double.MaxValue;
-                    Point3d bestExc = Point3d.Origin;
-                    Point3d bestQuarry = Point3d.Origin;
-                    int pointsInZone = 0;
-                    foreach (var excPt in excPoints)
+                    // 4. Чтение высот
+                    ed.WriteMessage("[2] Чтение высотных отметок...");
+                    // Теперь GeometricExtents вернет габариты именно обрезанных облаков
+                    double fixed_roof_z = GetMaxZ(excId, db);
+                    double z_q_min = GetMinZ(quarryId, db);
+                    double z_q_max = GetMaxZ(quarryId, db);
+                    // 5. Расчет
+                    double minDist;
+                    if (fixed_roof_z >= z_q_min && fixed_roof_z <= z_q_max)
                     {
-                        Vector3d vec = excPt - centerPoint;
-                        double distAlongAxis = vec.DotProduct(axisDir);
-                        double distAlongNormal = vec.DotProduct(normalDir);
-                        if (distAlongAxis >= 0 && distAlongAxis <= length && Math.Abs(distAlongNormal) <= halfWidth)
-                        {
-                            pointsInZone++;
-                            var quarryPt = quarryPoints
-                                .Where(q => Math.Abs(q.X - excPt.X) < 0.5 && Math.Abs(q.Y - excPt.Y) < 0.5)
-                                .OrderBy(q => Math.Abs(q.Z - excPt.Z))
-                                .FirstOrDefault();
-                            if (quarryPt != Point3d.Origin)
-                            {
-                                double height = excPt.Z - quarryPt.Z;
-                                if (height > 0 && height < minHeight)
-                                {
-                                    minHeight = height;
-                                    bestExc = excPt;
-                                    bestQuarry = quarryPt;
-                                }
-                            }
-                        }
-                    }
-                    if (minHeight != double.MaxValue)
-                    {
-                        ed.WriteMessage($"\n--- РЕЗУЛЬТАТ ---");
-                        ed.WriteMessage($"\nТочек в зоне захватки: {pointsInZone}");
-                        ed.WriteMessage($"\nМинимальная мощность: {minHeight:F3} м.");
-                        ed.WriteMessage($"\nВерх выработки: Z = {bestExc.Z:F3} (X:{bestExc.X:F2}, Y:{bestExc.Y:F2})");
-                        ed.WriteMessage($"\nНиз карьера:    Z = {bestQuarry.Z:F3} (X:{bestQuarry.X:F2}, Y:{bestQuarry.Y:F2})");
+                        minDist = 0.0; // Пересекаются
                     }
                     else
                     {
-                        ed.WriteMessage("\nВ заданной зоне не найдено корректных пар точек.");
+                        double dist1 = Math.Abs(fixed_roof_z - z_q_min);
+                        double dist2 = Math.Abs(fixed_roof_z - z_q_max);
+                        minDist = Math.Min(dist1, dist2);
                     }
-                    tr.Commit();
+                    // Вывод результата
+                    ed.WriteMessage($"\n[3] РЕЗУЛЬТАТ:");
+                    ed.WriteMessage($"\n    Верх выработки: {fixed_roof_z:F2}");
+                    ed.WriteMessage($"\n    Карьер от: {z_q_min:F2} до {z_q_max:F2}");
+                    ed.WriteMessage($"\n    Минимальное расстояние: {minDist:F2} м.");
+                    // 6. Подпись
+                    using (Transaction trTxt = db.TransactionManager.StartTransaction())
+                    {
+                        var btrTxt = (BlockTableRecord)trTxt.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+                        Point3d textPt = ptFace + new Vector3d(2, 2, 0);
+                        DBText text = new DBText();
+                        text.Position = textPt;
+                        text.Height = 1.5;
+                        text.TextString = $"H = {minDist:F2} м";
+                        btrTxt.AppendEntity(text);
+                        trTxt.AddNewlyCreatedDBObject(text, true);
+                        trTxt.Commit();
+                    }
                 }
                 catch (System.Exception ex)
                 {
-                    ed.WriteMessage($"\nОшибка: {ex.Message}");
-                    tr.Abort();
+                    ed.WriteMessage($"\n[ОШИБКА РАСЧЕТА] {ex.Message}");
                 }
             }
         }
-        // Извлечение точек через метод traverseAllPointData (рефлексия)
-        private List<Point3d> ExtractPointsViaTraverse(DBObject dbObj, Editor ed, string name)
+        private Polyline CreatePolyline(Point3d p1, Point3d p2, Point3d p3, Point3d p4)
         {
-            var points = new List<Point3d>();
-            Type type = dbObj.GetType();
-            // Ищем метод traverseAllPointData (может называться по-разному)
-            var method = type.GetMethod("traverseAllPointData", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
-            if (method == null)
+            Polyline pl = new Polyline();
+            pl.AddVertexAt(0, new Point2d(p1.X, p1.Y), 0, 0, 0);
+            pl.AddVertexAt(1, new Point2d(p2.X, p2.Y), 0, 0, 0);
+            pl.AddVertexAt(2, new Point2d(p3.X, p3.Y), 0, 0, 0);
+            pl.AddVertexAt(3, new Point2d(p4.X, p4.Y), 0, 0, 0);
+            pl.Closed = true;
+            return pl;
+        }
+        private double GetMaxZ(ObjectId id, Database db)
+        {
+            using (Transaction tr = db.TransactionManager.StartTransaction())
             {
-                // Пробуем альтернативные имена
-                foreach (var mName in new[] { "TraverseAllPointData", "traverseAllPoints", "TraverseAllPoints" })
-                {
-                    method = type.GetMethod(mName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
-                    if (method != null) break;
-                }
+                var ent = (Entity)tr.GetObject(id, OpenMode.ForRead);
+                var ext = ent.GeometricExtents;
+                return Math.Max(ext.MinPoint.Z, ext.MaxPoint.Z);
             }
-            if (method == null)
+        }
+        private double GetMinZ(ObjectId id, Database db)
+        {
+            using (Transaction tr = db.TransactionManager.StartTransaction())
             {
-                ed.WriteMessage($"\n[{name}] Метод traverseAllPointData не найден.");
-                return null;
+                var ent = (Entity)tr.GetObject(id, OpenMode.ForRead);
+                var ext = ent.GeometricExtents;
+                return Math.Min(ext.MinPoint.Z, ext.MaxPoint.Z);
             }
-            try
-            {
-                // Метод принимает делегат-обработчик, который вызывается для каждого буфера точек.
-                // Мы создаем делегат, который собирает точки.
-                // В C# это можно сделать через Expression Trees или просто через dynamic.
-                // Но проще всего использовать dynamic и передать лямбду.
-                // Однако, поскольку метод ожидает конкретный тип делегата, это может быть сложно.
-                // Вместо этого попробуем вызвать метод без параметров, если такая перегрузка есть.
-                // Или используем подход с буфером.
-                
-                // Упрощенный вариант: попробуем вызвать метод, который возвращает коллекцию точек.
-                var result = method.Invoke(dbObj, null);
-                if (result is System.Collections.IEnumerable enumerable)
-                {
-                    foreach (var item in enumerable)
-                    {
-                        if (item is Point3d pt) points.Add(pt);
-                        else
-                        {
-                            var loc = item.GetType().GetProperty("Location")?.GetValue(item) ?? item.GetType().GetProperty("Point")?.GetValue(item);
-                            if (loc is Point3d p) points.Add(p);
-                        }
-                    }
-                }
-            }
-            catch (System.Exception ex)
-            {
-                ed.WriteMessage($"\n[{name}] Ошибка при вызове traverseAllPointData: {ex.Message}");
-                return null;
-            }
-            if (points.Count > 0)
-            {
-                ed.WriteMessage($"\n[{name}] Успешно извлечено точек: {points.Count}");
-                return points;
-            }
-            ed.WriteMessage($"\n[{name}] Метод найден, но точки не извлечены. Возможно, требуется другая сигнатура.");
-            return null;
         }
     }
 }
