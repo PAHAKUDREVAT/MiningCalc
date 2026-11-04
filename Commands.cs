@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using Teigha.DatabaseServices;
@@ -9,8 +12,8 @@ namespace MiningCalc
 {
     public class Commands
     {
-        [CommandMethod("SURVEY_MIN")]
-        public void RunSurveyMin()
+        [CommandMethod("SURVEY_FAST")]
+        public void RunSurveyFast()
         {
             Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
@@ -25,11 +28,7 @@ namespace MiningCalc
                 var perExc = ed.GetEntity(peoExc);
                 if (perExc.Status != PromptStatus.OK) return;
 
-                var peoLine = new PromptEntityOptions("\nВыберите линию ЗАБОЯ: ");
-                peoLine.AddAllowedClass(typeof(Polyline), false);
-                var perLine = ed.GetEntity(peoLine);
-                if (perLine.Status != PromptStatus.OK) return;
-
+                // Запрашиваем точки у пользователя
                 while (true)
                 {
                     var ppoFace = new PromptPointOptions("\nТочка выпуска на ЛИНИИ ЗАБОЯ (Enter для выхода): ");
@@ -45,7 +44,8 @@ namespace MiningCalc
                     if (pprInward.Status != PromptStatus.OK) break;
                     Point3d ptInward = pprInward.Value;
 
-                    ExecuteCalculation(doc, perQuarry.ObjectId, perExc.ObjectId, ptFace, ptInward);
+                    // Запускаем чистый математический расчет без команд CAD
+                    ExecuteMathCalculation(doc, perQuarry.ObjectId, perExc.ObjectId, ptFace, ptInward);
                 }
             }
             catch (System.Exception ex)
@@ -54,109 +54,92 @@ namespace MiningCalc
             }
         }
 
-        private void ExecuteCalculation(Document doc, ObjectId quarryId, ObjectId excId, Point3d ptFace, Point3d ptInward)
+        private void ExecuteMathCalculation(Document doc, ObjectId quarryId, ObjectId excId, Point3d ptFace, Point3d ptInward)
         {
             Editor ed = doc.Editor;
             Database db = doc.Database;
 
-            Vector3d vFwd = (ptInward - ptFace).GetNormal();
-            Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0);
-
-            Point3d p1_s = ptFace + vSide * -7.5;
-            Point3d p2_s = ptFace + vSide * 7.5;
-            Point3d p3_s = p2_s + vFwd * 1.0;
-            Point3d p4_s = p1_s + vFwd * 1.0;
-
-            Point3d p1_l = ptFace + vSide * -7.5;
-            Point3d p2_l = ptFace + vSide * 7.5;
-            Point3d p3_l = p2_l + vFwd * 20.0;
-            Point3d p4_l = p1_l + vFwd * 20.0;
-
-            ObjectId newExcId = ObjectId.Null;
-            ObjectId newQuarryId = ObjectId.Null;
+            Vector3d vFwd = (ptInward - ptFace).GetNormal(); // Направление вглубь
+            Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0); // Перпендикуляр
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 try
                 {
-                    var btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+                    // Читаем точки из обоих облаков в память
+                    Entity excEnt = (Entity)tr.GetObject(excId, OpenMode.ForRead);
+                    Entity quarryEnt = (Entity)tr.GetObject(quarryId, OpenMode.ForRead);
 
-                    Polyline pline_s = CreatePolyline(p1_s, p2_s, p3_s, p4_s);
-                    btr.AppendEntity(pline_s);
-                    tr.AddNewlyCreatedDBObject(pline_s, true);
+                    List<Point3d> excPoints = GetAllPointsReflection(excEnt);
+                    List<Point3d> quarryPoints = GetAllPointsReflection(quarryEnt);
 
-                    Polyline pline_l = CreatePolyline(p1_l, p2_l, p3_l, p4_l);
-                    btr.AppendEntity(pline_l);
-                    tr.AddNewlyCreatedDBObject(pline_l, true);
+                    ed.WriteMessage($"\n[1] Загружено точек: Выработка={excPoints.Count}, Карьер={quarryPoints.Count}");
 
-                    tr.Commit();
-
-                    ed.WriteMessage("\n[1] Обрезка и извлечение данных...");
-
-                    // --- Обрезка и извлечение для ВЫРАБОТКИ ---
-                    ed.SetImpliedSelection(new ObjectId[] { excId });
-                    ed.Command("_.NPC_CLIP_FENCE", p1_s, p2_s, p3_s, p4_s, "");
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", excId);
-                    
-                    // Ищем последнее созданное облако (по имени типа)
-                    newExcId = GetLastCreatedPointCloudId(db);
-
-                    // --- Обрезка и извлечение для КАРЬЕРА ---
-                    ed.SetImpliedSelection(new ObjectId[] { quarryId });
-                    ed.Command("_.NPC_CLIP_FENCE", p1_l, p2_l, p3_l, p4_l, "");
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", quarryId);
-                    
-                    newQuarryId = GetLastCreatedPointCloudId(db);
-
-                    // Удаляем временные полилинии
-                    using (Transaction trDel = db.TransactionManager.StartTransaction())
+                    // --- ШАГ 1: Фиксируем верх выработки (в радиусе 2м от точки) ---
+                    double fixed_roof_z = double.MinValue;
+                    foreach (var pt in excPoints)
                     {
-                        ((Entity)trDel.GetObject(pline_s.ObjectId, OpenMode.ForWrite)).Erase();
-                        ((Entity)trDel.GetObject(pline_l.ObjectId, OpenMode.ForWrite)).Erase();
-                        trDel.Commit();
+                        // Если точка в радиусе 7.5м по бокам и 2м вперед
+                        Vector3d vec = pt - ptFace;
+                        double dFwd = vec.DotProduct(vFwd);
+                        double dSide = vec.DotProduct(vSide);
+
+                        if (dFwd >= 0 && dFwd <= 2.0 && Math.Abs(dSide) <= 7.5)
+                        {
+                            if (pt.Z > fixed_roof_z) fixed_roof_z = pt.Z;
+                        }
                     }
 
-                    if (newExcId == ObjectId.Null || newQuarryId == ObjectId.Null)
+                    if (fixed_roof_z == double.MinValue)
                     {
-                        ed.WriteMessage("\n[ОШИБКА] Не удалось извлечь новые облака. Возможно, в зоне нет точек.");
+                        ed.WriteMessage("\n[ОШИБКА] В зоне забоя не найдено точек выработки.");
                         return;
                     }
 
-                    double fixed_roof_z = GetMaxZ(newExcId, db);
-                    double z_q_min = GetMinZ(newQuarryId, db);
-                    double z_q_max = GetMaxZ(newQuarryId, db);
+                    // --- ШАГ 2: Ищем минимальное расстояние до карьера (в интервале 20м) ---
+                    double minDist = double.MaxValue;
+                    bool found = false;
 
-                    double minDist;
-                    if (fixed_roof_z >= z_q_min && fixed_roof_z <= z_q_max)
-                        minDist = 0.0;
-                    else
+                    foreach (var pt in quarryPoints)
                     {
-                        double dist1 = Math.Abs(fixed_roof_z - z_q_min);
-                        double dist2 = Math.Abs(fixed_roof_z - z_q_max);
-                        minDist = Math.Min(dist1, dist2);
+                        Vector3d vec = pt - ptFace;
+                        double dFwd = vec.DotProduct(vFwd);
+                        double dSide = vec.DotProduct(vSide);
+
+                        // Зона 20м вглубь, 7.5м в стороны
+                        if (dFwd >= 0 && dFwd <= 20.0 && Math.Abs(dSide) <= 7.5)
+                        {
+                            double dist = Math.Abs(fixed_roof_z - pt.Z);
+                            if (dist < minDist)
+                            {
+                                minDist = dist;
+                                found = true;
+                            }
+                        }
                     }
 
-                    ed.WriteMessage($"\n[2] РЕЗУЛЬТАТ:");
-                    ed.WriteMessage($"\n    Верх выработки: {fixed_roof_z:F2}");
-                    ed.WriteMessage($"\n    Карьер от: {z_q_min:F2} до {z_q_max:F2}");
-                    ed.WriteMessage($"\n    Минимальное расстояние: {minDist:F2} м.");
-
-                    using (Transaction trTxt = db.TransactionManager.StartTransaction())
+                    // --- ШАГ 3: Вывод результата ---
+                    if (found)
                     {
-                        var btrTxt = (BlockTableRecord)trTxt.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
-                        Point3d textPt = ptFace + new Vector3d(2, 2, 0);
-                        DBText text = new DBText();
-                        text.Position = textPt;
-                        text.Height = 1.5;
-                        text.TextString = $"H = {minDist:F2} м";
-                        btrTxt.AppendEntity(text);
-                        trTxt.AddNewlyCreatedDBObject(text, true);
+                        ed.WriteMessage($"\n[2] РЕЗУЛЬТАТ: H = {minDist:F2} м. (Верх выработки: {fixed_roof_z:F2})");
 
-                        if (newExcId != ObjectId.Null)
-                            ((Entity)trTxt.GetObject(newExcId, OpenMode.ForWrite)).Erase();
-                        if (newQuarryId != ObjectId.Null)
-                            ((Entity)trTxt.GetObject(newQuarryId, OpenMode.ForWrite)).Erase();
-                        trTxt.Commit();
+                        // Ставим подпись
+                        using (Transaction trTxt = db.TransactionManager.StartTransaction())
+                        {
+                            var btrTxt = (BlockTableRecord)trTxt.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+                            Point3d textPt = ptFace + new Vector3d(2, 2, 0);
+                            DBText text = new DBText();
+                            text.Position = textPt;
+                            text.Height = 1.5;
+                            text.TextString = $"H = {minDist:F2} м";
+                            btrTxt.AppendEntity(text);
+                            trTxt.AddNewlyCreatedDBObject(text, true);
+                            trTxt.Commit();
+                        }
+                    }
+                    else
+                    {
+                        ed.WriteMessage("\n[ОШИБКА] В 20-метровой зоне не найдено точек карьера.");
                     }
                 }
                 catch (System.Exception ex)
@@ -166,62 +149,62 @@ namespace MiningCalc
             }
         }
 
-        // Поиск последнего созданного облака точек по имени типа
-        private ObjectId GetLastCreatedPointCloudId(Database db)
+        // Метод прямого извлечения точек из облака (через allVertexIterator)
+        private List<Point3d> GetAllPointsReflection(Entity ent)
         {
-            using (Transaction tr = db.TransactionManager.StartTransaction())
+            var points = new List<Point3d>();
+            try
             {
-                var btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
-                ObjectId lastId = ObjectId.Null;
-                long maxHandle = -1;
-
-                foreach (ObjectId id in btr)
+                // Пытаемся найти свойство allVertexIterator, которое было в вашей первой DLL
+                var prop = ent.GetType().GetProperty("allVertexIterator", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                if (prop == null)
                 {
-                    try
+                    // Если свойства нет, пробуем метод
+                    var method = ent.GetType().GetMethod("GetAllVertexIterator", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (method != null) prop = null; // Заглушка, обработаем ниже
+                }
+
+                object iterator = null;
+                if (prop != null) iterator = prop.GetValue(ent);
+                else
+                {
+                    var method = ent.GetType().GetMethod("GetAllVertexIterator", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (method != null) iterator = method.Invoke(ent, null);
+                }
+
+                if (iterator != null)
+                {
+                    var nextMethod = iterator.GetType().GetMethod("Next");
+                    var currentProp = iterator.GetType().GetProperty("Current");
+
+                    while (true)
                     {
-                        var ent = (Entity)tr.GetObject(id, OpenMode.ForRead);
-                        // Проверяем, что в названии класса есть "PointCloud"
-                        if (ent.GetType().Name.Contains("PointCloud") && ent.Handle.Value > maxHandle)
+                        bool hasNext = false;
+                        if (nextMethod != null)
                         {
-                            maxHandle = ent.Handle.Value;
-                            lastId = id;
+                            var res = nextMethod.Invoke(iterator, null);
+                            if (res is bool b) hasNext = b;
+                            else if (res != null) hasNext = true;
+                        }
+
+                        if (!hasNext && nextMethod != null) break;
+
+                        var current = currentProp?.GetValue(iterator);
+                        if (current is Point3d pt) points.Add(pt);
+                        else if (current != null)
+                        {
+                            // Если итератор возвращает объект, ищем в нем координаты
+                            var loc = current.GetType().GetProperty("Location")?.GetValue(current);
+                            if (loc is Point3d p) points.Add(p);
                         }
                     }
-                    catch { }
                 }
-                return lastId;
             }
-        }
-
-        private Polyline CreatePolyline(Point3d p1, Point3d p2, Point3d p3, Point3d p4)
-        {
-            Polyline pl = new Polyline();
-            pl.AddVertexAt(0, new Point2d(p1.X, p1.Y), 0, 0, 0);
-            pl.AddVertexAt(1, new Point2d(p2.X, p2.Y), 0, 0, 0);
-            pl.AddVertexAt(2, new Point2d(p3.X, p3.Y), 0, 0, 0);
-            pl.AddVertexAt(3, new Point2d(p4.X, p4.Y), 0, 0, 0);
-            pl.Closed = true;
-            return pl;
-        }
-
-        private double GetMaxZ(ObjectId id, Database db)
-        {
-            using (Transaction tr = db.TransactionManager.StartTransaction())
+            catch
             {
-                var ent = (Entity)tr.GetObject(id, OpenMode.ForRead);
-                var ext = ent.GeometricExtents;
-                return Math.Max(ext.MinPoint.Z, ext.MaxPoint.Z);
+                // Игнорируем, если что-то пошло не так
             }
-        }
-
-        private double GetMinZ(ObjectId id, Database db)
-        {
-            using (Transaction tr = db.TransactionManager.StartTransaction())
-            {
-                var ent = (Entity)tr.GetObject(id, OpenMode.ForRead);
-                var ext = ent.GeometricExtents;
-                return Math.Min(ext.MinPoint.Z, ext.MaxPoint.Z);
-            }
+            return points;
         }
     }
 }
