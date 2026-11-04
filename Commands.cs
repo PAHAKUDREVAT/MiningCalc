@@ -93,17 +93,20 @@ namespace MiningCalc
 
                     ed.WriteMessage("\n[1] Обрезка и извлечение данных...");
 
-                    // Обрезка и извлечение для ВЫРАБОТКИ
+                    // --- Обрезка и извлечение для ВЫРАБОТКИ ---
                     ed.SetImpliedSelection(new ObjectId[] { excId });
                     ed.Command("_.NPC_CLIP_FENCE", p1_s, p2_s, p3_s, p4_s, "");
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", "");
-                    newExcId = GetLastCreatedEntityId(db);
+                    
+                    // Передаем ObjectId облака для выбора
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", excId);
+                    newExcId = GetLastCreatedEntityId(db, typeof(PointCloudEx));
 
-                    // Обрезка и извлечение для КАРЬЕРА
+                    // --- Обрезка и извлечение для КАРЬЕРА ---
                     ed.SetImpliedSelection(new ObjectId[] { quarryId });
                     ed.Command("_.NPC_CLIP_FENCE", p1_l, p2_l, p3_l, p4_l, "");
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", "");
-                    newQuarryId = GetLastCreatedEntityId(db);
+                    
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", quarryId);
+                    newQuarryId = GetLastCreatedEntityId(db, typeof(PointCloudEx));
 
                     // Удаляем временные полилинии
                     using (Transaction trDel = db.TransactionManager.StartTransaction())
@@ -163,7 +166,8 @@ namespace MiningCalc
             }
         }
 
-        private ObjectId GetLastCreatedEntityId(Database db)
+        // Поиск последнего созданного объекта заданного типа
+        private ObjectId GetLastCreatedEntityId(Database db, Type targetType)
         {
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
@@ -176,7 +180,7 @@ namespace MiningCalc
                     try
                     {
                         var ent = (Entity)tr.GetObject(id, OpenMode.ForRead);
-                        if (ent.Handle.Value > maxHandle)
+                        if (targetType.IsAssignableFrom(ent.GetType()) && ent.Handle.Value > maxHandle)
                         {
                             maxHandle = ent.Handle.Value;
                             lastId = id;
