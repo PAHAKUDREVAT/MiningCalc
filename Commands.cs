@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using Teigha.DatabaseServices;
@@ -63,13 +64,11 @@ namespace MiningCalc
             Vector3d vFwd = (ptInward - ptFace).GetNormal();
             Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0);
 
-            // Рамка для выработки (15х1)
             Point3d p1_s = ptFace + vSide * -7.5;
             Point3d p2_s = ptFace + vSide * 7.5;
             Point3d p3_s = p2_s + vFwd * 1.0;
             Point3d p4_s = p1_s + vFwd * 1.0;
 
-            // Рамка для карьера (15х20)
             Point3d p1_l = ptFace + vSide * -7.5;
             Point3d p2_l = ptFace + vSide * 7.5;
             Point3d p3_l = p2_l + vFwd * 20.0;
@@ -91,20 +90,28 @@ namespace MiningCalc
                     Polyline pline_l = CreatePolyline(p1_l, p2_l, p3_l, p4_l);
                     btr.AppendEntity(pline_l);
                     tr.AddNewlyCreatedDBObject(pline_l, true);
-                    
+
                     tr.Commit();
 
-                    // 1. Обрезка и ИЗВЛЕЧЕНИЕ в новые объекты
                     ed.WriteMessage("\n[1] Обрезка и извлечение данных...");
                     
-                    // Обрезаем выработку
-                    ed.Command("_.NPC_CROP", excId, "", pline_s.ObjectId, "");
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", excId, "");
+                    // --- ОБРЕЗКА ВЫРАБОТКИ ---
+                    ed.SetImpliedSelection(new ObjectId[] { excId });
+                    ed.Command("_.NPC_CROP", "", pline_s.ObjectId);
+
+                    // --- ИЗВЛЕЧЕНИЕ ВЫРАБОТКИ ---
+                    ed.SetImpliedSelection(new ObjectId[] { excId });
+                    // _N = No (не использовать все облака), "" = подтвердить выбор
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", "");
                     newExcId = GetLastCreatedEntityId(db);
 
-                    // Обрезаем карьер
-                    ed.Command("_.NPC_CROP", quarryId, "", pline_l.ObjectId, "");
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", quarryId, "");
+                    // --- ОБРЕЗКА КАРЬЕРА ---
+                    ed.SetImpliedSelection(new ObjectId[] { quarryId });
+                    ed.Command("_.NPC_CROP", "", pline_l.ObjectId);
+
+                    // --- ИЗВЛЕЧЕНИЕ КАРЬЕРА ---
+                    ed.SetImpliedSelection(new ObjectId[] { quarryId });
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", "");
                     newQuarryId = GetLastCreatedEntityId(db);
 
                     // Удаляем временные рамки
@@ -115,31 +122,26 @@ namespace MiningCalc
                         trDel.Commit();
                     }
 
-                    // 2. Чтение габаритов ИЗВЛЕЧЕННЫХ (маленьких) облаков
-                    double fixed_roof_z = 0;
-                    double z_q_min = 0, z_q_max = 0;
-
-                    if (newExcId != ObjectId.Null)
-                        fixed_roof_z = GetMaxZ(newExcId, db);
-                    
-                    if (newQuarryId != ObjectId.Null)
+                    if (newExcId == ObjectId.Null || newQuarryId == ObjectId.Null)
                     {
-                        z_q_min = GetMinZ(newQuarryId, db);
-                        z_q_max = GetMaxZ(newQuarryId, db);
+                        ed.WriteMessage("\n[ОШИБКА] Не удалось извлечь новые облака. Возможно, в зоне нет точек.");
+                        return;
                     }
 
-                    // 3. Расчет
+                    // Чтение высот
+                    double fixed_roof_z = GetMaxZ(newExcId, db);
+                    double z_q_min = GetMinZ(newQuarryId, db);
+                    double z_q_max = GetMaxZ(newQuarryId, db);
+
+                    // Расчет
                     double minDist = 0;
-                    if (newExcId != ObjectId.Null && newQuarryId != ObjectId.Null)
+                    if (fixed_roof_z >= z_q_min && fixed_roof_z <= z_q_max)
+                        minDist = 0.0;
+                    else
                     {
-                        if (fixed_roof_z >= z_q_min && fixed_roof_z <= z_q_max)
-                            minDist = 0.0;
-                        else
-                        {
-                            double dist1 = Math.Abs(fixed_roof_z - z_q_min);
-                            double dist2 = Math.Abs(fixed_roof_z - z_q_max);
-                            minDist = Math.Min(dist1, dist2);
-                        }
+                        double dist1 = Math.Abs(fixed_roof_z - z_q_min);
+                        double dist2 = Math.Abs(fixed_roof_z - z_q_max);
+                        minDist = Math.Min(dist1, dist2);
                     }
 
                     ed.WriteMessage($"\n[2] РЕЗУЛЬТАТ:");
@@ -147,7 +149,7 @@ namespace MiningCalc
                     ed.WriteMessage($"\n    Карьер от: {z_q_min:F2} до {z_q_max:F2}");
                     ed.WriteMessage($"\n    Минимальное расстояние: {minDist:F2} м.");
 
-                    // 4. Подпись
+                    // Подпись и удаление мусора
                     using (Transaction trTxt = db.TransactionManager.StartTransaction())
                     {
                         var btrTxt = (BlockTableRecord)trTxt.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
@@ -159,12 +161,8 @@ namespace MiningCalc
                         btrTxt.AppendEntity(text);
                         trTxt.AddNewlyCreatedDBObject(text, true);
                         
-                        // Удаляем временные извлеченные облака
-                        if (newExcId != ObjectId.Null)
-                            ((Entity)trTxt.GetObject(newExcId, OpenMode.ForWrite)).Erase();
-                        if (newQuarryId != ObjectId.Null)
-                            ((Entity)trTxt.GetObject(newQuarryId, OpenMode.ForWrite)).Erase();
-                            
+                        ((Entity)trTxt.GetObject(newExcId, OpenMode.ForWrite)).Erase();
+                        ((Entity)trTxt.GetObject(newQuarryId, OpenMode.ForWrite)).Erase();
                         trTxt.Commit();
                     }
                 }
@@ -175,18 +173,14 @@ namespace MiningCalc
             }
         }
 
-        // Получение ID последнего созданного объекта
         private ObjectId GetLastCreatedEntityId(Database db)
         {
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
-                var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
-                var btr = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
-                
-                // В .NET нет прямого entlast, поэтому перебираем и ищем самый новый
+                var btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
                 ObjectId lastId = ObjectId.Null;
                 long maxHandle = -1;
-                
+
                 foreach (ObjectId id in btr)
                 {
                     try
