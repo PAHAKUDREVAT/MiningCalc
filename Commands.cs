@@ -237,12 +237,12 @@ namespace MiningCalc
 
                     // --- ВЕРХ ВЫРАБОТКИ ---
                     ed.SetImpliedSelection(new ObjectId[] { _excId });
-                    ed.Command("_.NPC_CLIP_FENCE", p1, p2, p3, p4);
+                    ed.Command("_.NPC_CLIP_FENCE", p1, p2, p3, p4, "");
                     double maxZ_exc = GetMaxZWithFallback(ed, tr, ptOnLine, vFwd, vSide, 0.5, 7.5);
 
                     // --- НИЗ КАРЬЕРА ---
                     ed.SetImpliedSelection(new ObjectId[] { _quarryId });
-                    ed.Command("_.NPC_CLIP_FENCE", p1, p2, p3, p4);
+                    ed.Command("_.NPC_CLIP_FENCE", p1, p2, p3, p4, "");
                     double minZ_quarry = GetMinZWithFallback(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5);
 
                     _log.AppendLine($"Значения: Верх.выработки = {maxZ_exc:F3}, Низ.карьера = {minZ_quarry:F3}");
