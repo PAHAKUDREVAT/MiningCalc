@@ -73,14 +73,14 @@ namespace MiningCalc
 
         private void SelectEntity(string prompt, ref ObjectId id)
         {
-            Editor ed = Application.DocumentManager.MdiActiveDocument.Editor;
+            Editor ed = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Editor;
             var per = ed.GetEntity($"\n{prompt}: ");
             if (per.Status == PromptStatus.OK) id = per.ObjectId;
         }
 
         private void SelectLine(ref ObjectId id)
         {
-            Editor ed = Application.DocumentManager.MdiActiveDocument.Editor;
+            Editor ed = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Editor;
             var peo = new PromptEntityOptions("\nВыберите линию ЗАБОЯ: ");
             peo.AddAllowedClass(typeof(Polyline), false);
             var per = ed.GetEntity(peo);
@@ -95,7 +95,7 @@ namespace MiningCalc
                 return; 
             }
             
-            Editor ed = Application.DocumentManager.MdiActiveDocument.Editor;
+            Editor ed = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Editor;
 
             while (true)
             {
@@ -105,14 +105,14 @@ namespace MiningCalc
                 _log.Clear();
                 _log.AppendLine("--- НАЧАЛО РАСЧЕТА ---");
                 lblResult.Text = "Обработка (см. лог)...";
-                Application.DoEvents();
+                System.Windows.Forms.Application.DoEvents();
 
                 try
                 {
                     double minDist = ProcessZoneWithFallback(pprFace.Value);
                     lblResult.Text = $"РЕЗУЛЬТАТ:\nМин. расстояние:\n{minDist:F2} м.\n\n(Нажмите 'Показать лог' для деталей)";
                 }
-                catch (Exception ex)
+                catch (System.Exception ex)
                 {
                     _log.AppendLine($"КРИТИЧЕСКАЯ ОШИБКА: {ex.Message}");
                     lblResult.Text = "Ошибка! Смотрите лог.";
@@ -144,7 +144,7 @@ namespace MiningCalc
 
         private double ProcessZoneWithFallback(Point3d ptClick)
         {
-            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
             Database db = doc.Database;
 
@@ -193,7 +193,7 @@ namespace MiningCalc
                     searchBox.Erase();
 
                     if (tempCloudId.IsNull)
-                        throw new Exception("Не удалось извлечь кусок выработки для анализа бортов.");
+                        throw new System.Exception("Не удалось извлечь кусок выработки для анализа бортов.");
 
                     Entity tempCloud = (Entity)tr.GetObject(tempCloudId, OpenMode.ForRead);
                     Extents3d ext = tempCloud.GeometricExtents;
@@ -208,7 +208,7 @@ namespace MiningCalc
                     tr.Commit();
                     _log.AppendLine("Направление бортов определено успешно.");
                 }
-                catch (Exception ex)
+                catch (System.Exception ex)
                 {
                     tr.Abort();
                     _log.AppendLine($"ОШИБКА автоопределения бортов: {ex.Message}. Использую нормаль к забою.");
@@ -226,8 +226,8 @@ namespace MiningCalc
             Point3d p4 = p1 + vFwd * 20.0;
 
             // 2. Обрезка и расчет с фолбэками
-            object oldCmdEcho = Application.GetSystemVariable("CMDECHO");
-            Application.SetSystemVariable("CMDECHO", 0);
+            object oldCmdEcho = HostMgd.ApplicationServices.Application.GetSystemVariable("CMDECHO");
+            HostMgd.ApplicationServices.Application.SetSystemVariable("CMDECHO", 0);
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
@@ -270,7 +270,7 @@ namespace MiningCalc
                 }
                 finally
                 {
-                    Application.SetSystemVariable("CMDECHO", oldCmdEcho);
+                    HostMgd.ApplicationServices.Application.SetSystemVariable("CMDECHO", oldCmdEcho);
                     ed.Command("_.ZOOM", "_P");
                     CleanupTempObjects(db);
                 }
@@ -284,23 +284,23 @@ namespace MiningCalc
                 double res = TryExplode(ed, tr, ptOnLine, vFwd, vSide, depth, width, true);
                 if (res != double.MinValue) { _log.AppendLine("[Верх] Метод А (Взрыв): УСПЕХ."); return res; }
             }
-            catch (Exception ex) { _log.AppendLine($"[Верх] Метод А: ОШИБКА - {ex.Message}"); }
+            catch (System.Exception ex) { _log.AppendLine($"[Верх] Метод А: ОШИБКА - {ex.Message}"); }
 
             try
             {
                 double res = TryExport(ed, tr, ptOnLine, vFwd, vSide, depth, width, true);
                 if (res != double.MinValue) { _log.AppendLine("[Верх] Метод Б (Экспорт): УСПЕХ."); return res; }
             }
-            catch (Exception ex) { _log.AppendLine($"[Верх] Метод Б: ОШИБКА - {ex.Message}"); }
+            catch (System.Exception ex) { _log.AppendLine($"[Верх] Метод Б: ОШИБКА - {ex.Message}"); }
 
             try
             {
                 double res = TryBBox(ed, tr, ptOnLine, vFwd, vSide, depth, width, true);
                 if (res != double.MinValue) { _log.AppendLine("[Верх] Метод В (Габариты): УСПЕХ."); return res; }
             }
-            catch (Exception ex) { _log.AppendLine($"[Верх] Метод В: ОШИБКА - {ex.Message}"); }
+            catch (System.Exception ex) { _log.AppendLine($"[Верх] Метод В: ОШИБКА - {ex.Message}"); }
 
-            throw new Exception("Все методы поиска ВЕРХА провалились.");
+            throw new System.Exception("Все методы поиска ВЕРХА провалились.");
         }
 
         private double GetMinZWithFallback(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width)
@@ -310,23 +310,23 @@ namespace MiningCalc
                 double res = TryExplode(ed, tr, ptOnLine, vFwd, vSide, depth, width, false);
                 if (res != double.MaxValue) { _log.AppendLine("[Низ] Метод А (Взрыв): УСПЕХ."); return res; }
             }
-            catch (Exception ex) { _log.AppendLine($"[Низ] Метод А: ОШИБКА - {ex.Message}"); }
+            catch (System.Exception ex) { _log.AppendLine($"[Низ] Метод А: ОШИБКА - {ex.Message}"); }
 
             try
             {
                 double res = TryExport(ed, tr, ptOnLine, vFwd, vSide, depth, width, false);
                 if (res != double.MaxValue) { _log.AppendLine("[Низ] Метод Б (Экспорт): УСПЕХ."); return res; }
             }
-            catch (Exception ex) { _log.AppendLine($"[Низ] Метод Б: ОШИБКА - {ex.Message}"); }
+            catch (System.Exception ex) { _log.AppendLine($"[Низ] Метод Б: ОШИБКА - {ex.Message}"); }
 
             try
             {
                 double res = TryBBox(ed, tr, ptOnLine, vFwd, vSide, depth, width, false);
                 if (res != double.MaxValue) { _log.AppendLine("[Низ] Метод В (Габариты): УСПЕХ."); return res; }
             }
-            catch (Exception ex) { _log.AppendLine($"[Низ] Метод В: ОШИБКА - {ex.Message}"); }
+            catch (System.Exception ex) { _log.AppendLine($"[Низ] Метод В: ОШИБКА - {ex.Message}"); }
 
-            throw new Exception("Все методы поиска НИЗА провалились.");
+            throw new System.Exception("Все методы поиска НИЗА провалились.");
         }
 
         private double TryExplode(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width, bool findMax)
@@ -335,7 +335,7 @@ namespace MiningCalc
             ed.SetImpliedSelection(new ObjectId[] { targetId });
             ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N");
             ObjectId cloudId = FindLastCloud(tr);
-            if (cloudId.IsNull) throw new Exception("Извлечение не создало облако.");
+            if (cloudId.IsNull) throw new System.Exception("Извлечение не создало облако.");
 
             ed.Command("_.NG_EXPLODE_POINTCLOUD", cloudId);
             
@@ -373,7 +373,7 @@ namespace MiningCalc
 
             ed.SetImpliedSelection(new ObjectId[] { targetId });
             ed.Command("_.-NPC_EXPORT", "", file);
-            if (!File.Exists(file)) throw new Exception("Файл экспорта не создан.");
+            if (!File.Exists(file)) throw new System.Exception("Файл экспорта не создан.");
 
             double result = findMax ? double.MinValue : double.MaxValue;
             foreach (var line in File.ReadLines(file))
@@ -402,7 +402,7 @@ namespace MiningCalc
             ed.SetImpliedSelection(new ObjectId[] { targetId });
             ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N");
             ObjectId cloudId = FindLastCloud(tr);
-            if (cloudId.IsNull) throw new Exception("Извлечение не создало облако.");
+            if (cloudId.IsNull) throw new System.Exception("Извлечение не создало облако.");
 
             var ext = ((Entity)tr.GetObject(cloudId, OpenMode.ForRead)).GeometricExtents;
             ((Entity)tr.GetObject(cloudId, OpenMode.ForWrite)).Erase();
@@ -412,7 +412,7 @@ namespace MiningCalc
 
         private ObjectId FindLastCloud(Transaction tr)
         {
-            Database db = Application.DocumentManager.MdiActiveDocument.Database;
+            Database db = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Database;
             BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
             ObjectId lastId = ObjectId.Null;
             long maxHandle = -1;
@@ -449,7 +449,7 @@ namespace MiningCalc
 
         private void EmergencyCleanup()
         {
-            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             Database db = doc.Database;
             try
             {
@@ -470,7 +470,7 @@ namespace MiningCalc
                     MessageBox.Show($"Чертеж очищен!\nУдалено мусорных объектов: {count}", "Очистка", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
             }
-            catch (Exception ex) { MessageBox.Show("Ошибка очистки: " + ex.Message); }
+            catch (System.Exception ex) { MessageBox.Show("Ошибка очистки: " + ex.Message); }
         }
     }
 }
