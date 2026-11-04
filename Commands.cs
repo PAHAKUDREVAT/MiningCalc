@@ -1,6 +1,4 @@
 using System;
-using System.Collections.Generic;
-using System.Linq;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using Teigha.DatabaseServices;
@@ -94,27 +92,20 @@ namespace MiningCalc
                     tr.Commit();
 
                     ed.WriteMessage("\n[1] Обрезка и извлечение данных...");
-                    
-                    // --- ОБРЕЗКА ВЫРАБОТКИ ---
-                    ed.SetImpliedSelection(new ObjectId[] { excId });
-                    ed.Command("_.NPC_CROP", "", pline_s.ObjectId);
 
-                    // --- ИЗВЛЕЧЕНИЕ ВЫРАБОТКИ ---
+                    // Обрезка и извлечение для ВЫРАБОТКИ
                     ed.SetImpliedSelection(new ObjectId[] { excId });
-                    // _N = No (не использовать все облака), "" = подтвердить выбор
+                    ed.Command("_.NPC_CLIP_FENCE", p1_s, p2_s, p3_s, p4_s, "");
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", "");
                     newExcId = GetLastCreatedEntityId(db);
 
-                    // --- ОБРЕЗКА КАРЬЕРА ---
+                    // Обрезка и извлечение для КАРЬЕРА
                     ed.SetImpliedSelection(new ObjectId[] { quarryId });
-                    ed.Command("_.NPC_CROP", "", pline_l.ObjectId);
-
-                    // --- ИЗВЛЕЧЕНИЕ КАРЬЕРА ---
-                    ed.SetImpliedSelection(new ObjectId[] { quarryId });
+                    ed.Command("_.NPC_CLIP_FENCE", p1_l, p2_l, p3_l, p4_l, "");
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", "");
                     newQuarryId = GetLastCreatedEntityId(db);
 
-                    // Удаляем временные рамки
+                    // Удаляем временные полилинии
                     using (Transaction trDel = db.TransactionManager.StartTransaction())
                     {
                         ((Entity)trDel.GetObject(pline_s.ObjectId, OpenMode.ForWrite)).Erase();
@@ -124,17 +115,15 @@ namespace MiningCalc
 
                     if (newExcId == ObjectId.Null || newQuarryId == ObjectId.Null)
                     {
-                        ed.WriteMessage("\n[ОШИБКА] Не удалось извлечь новые облака. Возможно, в зоне нет точек.");
+                        ed.WriteMessage("\n[ОШИБКА] Не удалось извлечь новые облака.");
                         return;
                     }
 
-                    // Чтение высот
                     double fixed_roof_z = GetMaxZ(newExcId, db);
                     double z_q_min = GetMinZ(newQuarryId, db);
                     double z_q_max = GetMaxZ(newQuarryId, db);
 
-                    // Расчет
-                    double minDist = 0;
+                    double minDist;
                     if (fixed_roof_z >= z_q_min && fixed_roof_z <= z_q_max)
                         minDist = 0.0;
                     else
@@ -149,7 +138,6 @@ namespace MiningCalc
                     ed.WriteMessage($"\n    Карьер от: {z_q_min:F2} до {z_q_max:F2}");
                     ed.WriteMessage($"\n    Минимальное расстояние: {minDist:F2} м.");
 
-                    // Подпись и удаление мусора
                     using (Transaction trTxt = db.TransactionManager.StartTransaction())
                     {
                         var btrTxt = (BlockTableRecord)trTxt.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
@@ -160,9 +148,11 @@ namespace MiningCalc
                         text.TextString = $"H = {minDist:F2} м";
                         btrTxt.AppendEntity(text);
                         trTxt.AddNewlyCreatedDBObject(text, true);
-                        
-                        ((Entity)trTxt.GetObject(newExcId, OpenMode.ForWrite)).Erase();
-                        ((Entity)trTxt.GetObject(newQuarryId, OpenMode.ForWrite)).Erase();
+
+                        if (newExcId != ObjectId.Null)
+                            ((Entity)trTxt.GetObject(newExcId, OpenMode.ForWrite)).Erase();
+                        if (newQuarryId != ObjectId.Null)
+                            ((Entity)trTxt.GetObject(newQuarryId, OpenMode.ForWrite)).Erase();
                         trTxt.Commit();
                     }
                 }
