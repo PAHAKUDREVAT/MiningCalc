@@ -13,7 +13,7 @@ using HostMgd.Windows;
 using Teigha.DatabaseServices;
 using Teigha.Geometry;
 using Teigha.Runtime;
-using laszip.net;
+using laszip.net; // Не забудьте, что пакет LASzip.Net должен быть в .csproj
 
 namespace MiningCalc
 {
@@ -103,18 +103,19 @@ namespace MiningCalc
 
                 _log.Clear();
                 _log.AppendLine("--- НАЧАЛО РАСЧЕТА ---");
-                lblResult.Text = "Обработка (см. лог)...";
+                lblResult.Text = "Чтение файлов (см. лог)...";
                 System.Windows.Forms.Application.DoEvents();
 
                 try
                 {
                     double minDist = ProcessZoneFromFiles(pprFace.Value);
-                    lblResult.Text = $"РЕЗУЛЬТАТ:\nМин. расстояние:\n{minDist:F2} м.\n\n(Нажмите 'Показать лог' для деталей)";
+                    lblResult.Text = $"РЕЗУЛЬТАТ:\nМин. расстояние:\n{minDist:F2} м.\n\n(Нажмите 'Показать лог')";
                 }
                 catch (System.Exception ex)
                 {
                     _log.AppendLine($"КРИТИЧЕСКАЯ ОШИБКА: {ex.Message}");
                     lblResult.Text = "Ошибка! Смотрите лог.";
+                    MessageBox.Show($"Ошибка!\n{ex.Message}", "Сбой", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
@@ -148,6 +149,7 @@ namespace MiningCalc
             Point3d ptOnLine;
             Vector3d vFwd;
 
+            // 1. Определяем направление (нормаль к забою внутрь выработки)
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 Polyline faceLine = (Polyline)tr.GetObject(_lineId, OpenMode.ForRead);
@@ -164,34 +166,30 @@ namespace MiningCalc
             }
 
             Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0);
-            // Координаты зоны 15х20
-            Point3d p1 = ptOnLine + vSide * -7.5;
-            Point3d p2 = ptOnLine + vSide * 7.5;
-            Point3d p3 = p2 + vFwd * 20.0;
-            Point3d p4 = p1 + vFwd * 20.0;
 
-            // 1. Читаем пути к файлам
+            // 2. Получаем пути к файлам облаков
             string pathExc = GetFilePath(_excId);
             string pathQuarry = GetFilePath(_quarryId);
 
-            _log.AppendLine($"Путь Карьера: {pathExc}");
+            _log.AppendLine($"Путь Карьера: {pathQuarry}");
             _log.AppendLine($"Путь Выработки: {pathExc}");
 
-            if (pathExc == null || pathQuarry == null)
-                throw new System.Exception("Не удалось прочитать путь к файлам из свойств объектов.");
+            if (string.IsNullOrEmpty(pathExc) || string.IsNullOrEmpty(pathQuarry))
+                throw new System.Exception("Не удалось прочитать путь к файлам. Проверьте лог.");
 
-            // 2. Читаем точки из файлов
+            // 3. Читаем точки из файлов
+            _log.AppendLine("Чтение точек...");
             List<Point3d> qPoints = ReadPointCloudFile(pathQuarry);
             List<Point3d> ePoints = ReadPointCloudFile(pathExc);
 
             _log.AppendLine($"Загружено точек: Карьер={qPoints.Count}, Выработка={ePoints.Count}");
 
-            // 3. Фильтрация и расчет
+            // 4. Математическая фильтрация и расчет
             double maxZ_exc = double.MinValue;
             foreach (var pt in ePoints)
             {
                 Vector3d vec = pt - ptOnLine;
-                // Только в полосе 0.5м от забоя
+                // Только в полосе 0.5м от забоя (точка фиксации)
                 if (vec.DotProduct(vFwd) >= 0 && vec.DotProduct(vFwd) <= 0.5 && Math.Abs(vec.DotProduct(vSide)) <= 7.5)
                     if (pt.Z > maxZ_exc) maxZ_exc = pt.Z;
             }
@@ -200,18 +198,30 @@ namespace MiningCalc
             foreach (var pt in qPoints)
             {
                 Vector3d vec = pt - ptOnLine;
-                // В зоне 20м
+                // В зоне 20м от забоя
                 if (vec.DotProduct(vFwd) >= 0 && vec.DotProduct(vFwd) <= 20.0 && Math.Abs(vec.DotProduct(vSide)) <= 7.5)
                     if (pt.Z < minZ_quarry) minZ_quarry = pt.Z;
             }
 
-            _log.AppendLine($"Верх выработки: {maxZ_exc:F3}, Низ карьера: {minZ_quarry:F3}");
+            _log.AppendLine($"Верх выработки (0.5м): {maxZ_exc:F3}");
+            _log.AppendLine($"Низ карьера (20м): {minZ_quarry:F3}");
 
+            if (maxZ_exc == double.MinValue) throw new System.Exception("Нет точек выработки в зоне 0.5м от забоя.");
+            if (minZ_quarry == double.MaxValue) throw new System.Exception("Нет точек карьера в 20м зоне.");
+
+            // 5. Расчет высоты
             double result = 0;
             if (minZ_quarry > maxZ_exc) 
+            {
                 result = minZ_quarry - maxZ_exc;
-            
-            // Ставим подпись
+                _log.AppendLine($"[Расчет] {minZ_quarry:F3} - ({maxZ_exc:F3}) = {result:F3}");
+            }
+            else 
+            {
+                _log.AppendLine("[Расчет] Карьер ниже или на уровне. H = 0.");
+            }
+
+            // 6. Ставим подпись на чертеже
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
@@ -227,38 +237,69 @@ namespace MiningCalc
             return result;
         }
 
-        // Метод извлечения пути через рефлексию (ищем свойства Path, FileName, ActiveFileName и т.д.)
+        // --- ИЗВЛЕЧЕНИЕ ПУТИ ИЗ СВОЙСТВ ОБЛАКА ---
         private string GetFilePath(ObjectId id)
         {
             Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
             {
-                object ent = tr.GetObject(id, OpenMode.ForRead);
-                Type t = ent.GetType();
-                
-                // Ищем свойства, в которых может лежать путь
-                string[] propNames = { "Path", "FileName", "ActiveFileName", "SourceFileName", "PointCloudFile" };
-                foreach (var name in propNames)
+                try
                 {
-                    var prop = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
-                    if (prop != null)
+                    DBObject ent = tr.GetObject(id, OpenMode.ForRead);
+
+                    // Ищем ID определения облака
+                    PropertyInfo defIdProp = ent.GetType().GetProperty("PointCloudDefExId");
+                    if (defIdProp == null)
+                        defIdProp = ent.GetType().BaseType?.GetProperty("PointCloudDefExId");
+
+                    if (defIdProp != null)
                     {
-                        string val = prop.GetValue(ent) as string;
-                        if (!string.IsNullOrEmpty(val)) return val;
+                        object defIdObj = defIdProp.GetValue(ent);
+                        if (defIdObj is ObjectId defId && !defId.IsNull)
+                        {
+                            DBObject defEx = tr.GetObject(defId, OpenMode.ForRead);
+                            
+                            // Пытаемся получить путь из определения
+                            string[] propNames = { "SourceFileName", "ActiveFileName" };
+                            foreach (var name in propNames)
+                            {
+                                PropertyInfo pathProp = defEx.GetType().GetProperty(name);
+                                if (pathProp != null)
+                                {
+                                    string path = pathProp.GetValue(defEx) as string;
+                                    if (!string.IsNullOrEmpty(path)) return path;
+                                }
+                            }
+                        }
+                    }
+
+                    // Если не вышло, пробуем свойство Path напрямую
+                    PropertyInfo directPathProp = ent.GetType().GetProperty("Path");
+                    if (directPathProp != null)
+                    {
+                        string directPath = directPathProp.GetValue(ent) as string;
+                        if (!string.IsNullOrEmpty(directPath)) return directPath;
                     }
                 }
-                tr.Commit();
+                catch (System.Exception ex)
+                {
+                    _log.AppendLine($"[GetFilePath] Ошибка: {ex.Message}");
+                }
+                finally
+                {
+                    tr.Commit();
+                }
             }
             return null;
         }
 
-        // Чтение файла LAS/XYZ
+        // --- ЧТЕНИЕ ТОЧЕК ИЗ ФАЙЛА (LAS ИЛИ TXT/XYZ) ---
         private List<Point3d> ReadPointCloudFile(string path)
         {
             var pts = new List<Point3d>();
             if (!File.Exists(path)) throw new System.Exception($"Файл не найден: {path}");
 
-            // Если это LAS-файл, читаем через LASzip
+            // Если это LAS
             if (path.EndsWith(".las", StringComparison.OrdinalIgnoreCase))
             {
                 var laszip = new laszip_dll();
@@ -278,8 +319,8 @@ namespace MiningCalc
                 }
                 laszip.laszip_close_reader();
             }
-            // Если это текстовый файл (XYZ, CSV, TXT)
-            else
+            // Если это текстовый файл или CSV
+            else if (path.EndsWith(".txt") || path.EndsWith(".xyz") || path.EndsWith(".csv"))
             {
                 foreach (var line in File.ReadLines(path))
                 {
@@ -291,6 +332,11 @@ namespace MiningCalc
                         pts.Add(new Point3d(x, y, z));
                     }
                 }
+            }
+            else
+            {
+                // Если это .npc, мы не можем прочитать его как текст или LAS
+                throw new System.Exception($"Формат файла {Path.GetExtension(path)} не поддерживается для прямого чтения. Нужен LAS или TXT/CSV.");
             }
 
             return pts;
