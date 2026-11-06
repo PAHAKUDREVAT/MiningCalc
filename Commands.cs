@@ -19,8 +19,8 @@ namespace MiningCalc
 {
     public class Commands
     {
-        private static PaletteSet _palette;
-        private static SurveyControl _surveyControl;
+        private static PaletteSet? _palette;
+        private static SurveyControl? _surveyControl;
 
         [CommandMethod("SURVEY_UI")]
         public void ShowUI()
@@ -37,9 +37,17 @@ namespace MiningCalc
 
     public class SurveyControl : UserControl
     {
-        private Button btnSetQuarry, btnSetExc, btnSetLine, btnCalculate, btnLog;
-        private Label lblResult;
-        private ObjectId _quarryId = ObjectId.Null, _excId = ObjectId.Null, _lineId = ObjectId.Null;
+        // Используем null!, чтобы компилятор не ругался на инициализацию (мы делаем это в InitializeUI)
+        private Button btnSetQuarry = null!;
+        private Button btnSetExc = null!;
+        private Button btnSetLine = null!;
+        private Button btnCalculate = null!;
+        private Button btnLog = null!;
+        private Label lblResult = null!;
+        
+        private ObjectId _quarryId = ObjectId.Null;
+        private ObjectId _excId = ObjectId.Null;
+        private ObjectId _lineId = ObjectId.Null;
         private StringBuilder _log = new StringBuilder();
 
         public SurveyControl()
@@ -167,8 +175,8 @@ namespace MiningCalc
             Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0);
 
             // --- ПОЛУЧЕНИЕ ПУТЕЙ ---
-            string pathExc = GetFilePath(_excId);
-            string pathQuarry = GetFilePath(_quarryId);
+            string? pathExc = GetFilePath(_excId);
+            string? pathQuarry = GetFilePath(_quarryId);
 
             _log.AppendLine($"Путь Карьера: {pathQuarry}");
             _log.AppendLine($"Путь Выработки: {pathExc}");
@@ -225,8 +233,8 @@ namespace MiningCalc
             return result;
         }
 
-        // --- НАДЕЖНОЕ ИЗВЛЕЧЕНИЕ ПУТИ ---
-        private string GetFilePath(ObjectId id)
+        // --- ИЗВЛЕЧЕНИЕ ПУТИ БЕЗ ПРЯМОГО КЛАССА PointCloudEx ---
+        private string? GetFilePath(ObjectId id)
         {
             Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
@@ -235,47 +243,52 @@ namespace MiningCalc
                 {
                     DBObject ent = tr.GetObject(id, OpenMode.ForRead);
 
-                    // 1. Пытаемся получить PointCloudDefExId
+                    // 1. Ищем свойство PointCloudDefExId через рефлексию (без указания типа)
                     ObjectId defId = ObjectId.Null;
-                    PropertyInfo defIdProp = ent.GetType().GetProperty("PointCloudDefExId");
+                    PropertyInfo? defIdProp = ent.GetType().GetProperty("PointCloudDefExId");
                     if (defIdProp == null)
                         defIdProp = ent.GetType().BaseType?.GetProperty("PointCloudDefExId");
 
                     if (defIdProp != null)
                     {
-                        object defIdObj = defIdProp.GetValue(ent);
+                        object? defIdObj = defIdProp.GetValue(ent);
                         if (defIdObj is ObjectId oid) defId = oid;
                     }
 
+                    // Если не нашли, пробуем через dynamic (вдруг это скрытый класс)
                     if (defId.IsNull)
                     {
-                        // Если свойства нет, возможно, это PointCloudEx
-                        var pcEx = ent as PointCloudEx;
-                        if (pcEx != null) defId = pcEx.PointCloudDefExId;
+                        try
+                        {
+                            dynamic dynEnt = ent;
+                            object? dynDefId = dynEnt.PointCloudDefExId;
+                            if (dynDefId is ObjectId dOid) defId = dOid;
+                        }
+                        catch { /* Игнорируем */ }
                     }
 
                     if (!defId.IsNull)
                     {
                         DBObject defEx = tr.GetObject(defId, OpenMode.ForRead);
                         
-                        // 2. Ищем SourceFileName или ActiveFileName
+                        // 2. Ищем путь в определении
                         string[] propNames = { "SourceFileName", "ActiveFileName" };
                         foreach (var name in propNames)
                         {
-                            PropertyInfo pathProp = defEx.GetType().GetProperty(name);
+                            PropertyInfo? pathProp = defEx.GetType().GetProperty(name);
                             if (pathProp != null)
                             {
-                                string path = pathProp.GetValue(defEx) as string;
+                                string? path = pathProp.GetValue(defEx) as string;
                                 if (!string.IsNullOrEmpty(path)) return path;
                             }
                         }
                     }
 
                     // 3. Запасной вариант: прямое свойство Path
-                    PropertyInfo directPathProp = ent.GetType().GetProperty("Path");
+                    PropertyInfo? directPathProp = ent.GetType().GetProperty("Path");
                     if (directPathProp != null)
                     {
-                        string directPath = directPathProp.GetValue(ent) as string;
+                        string? directPath = directPathProp.GetValue(ent) as string;
                         if (!string.IsNullOrEmpty(directPath)) return directPath;
                     }
                 }
@@ -291,7 +304,6 @@ namespace MiningCalc
             return null;
         }
 
-        // --- ЧТЕНИЕ ФАЙЛА ---
         private List<Point3d> ReadPointCloudFile(string path)
         {
             var pts = new List<Point3d>();
