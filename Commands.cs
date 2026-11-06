@@ -155,7 +155,6 @@ namespace MiningCalc
             Point3d ptOnLine;
             Vector3d vFwd;
 
-            // 1. Определение направления
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 Polyline faceLine = (Polyline)tr.GetObject(_lineId, OpenMode.ForRead);
@@ -189,33 +188,34 @@ namespace MiningCalc
                     // === ВЕРХ ВЫРАБОТКИ ===
                     _log.AppendLine("[1] Извлечение выработки...");
                     ed.Command("_.ZOOM", "_W", p1, p3);
-                    System.Threading.Thread.Sleep(100); // Даем камере обновиться
+                    ed.Command("_.REGEN");
                     
-                    // ИСПРАВЛЕНО: Передаем ID, подтверждаем выбор, и говорим _Y (использовать все видимые)
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", _excId, "", "_Y");
+                    ed.SetImpliedSelection(new ObjectId[] { _excId });
+                    
+                    // Безопасный вызов команды с ожиданием завершения
+                    ExecuteCommandAndWait(doc, "_.NPC_EXTRACT_FROM_VIEW _N \n");
                     
                     ObjectId excCloudId = FindLastCloud(tr);
                     if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку (возможно, в зоне пусто).");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", excCloudId);
                     
-                    // Ищем максимум (верх)
                     double maxZ_exc = FindMaxZInBox(ed, tr, ptOnLine, vFwd, vSide, 0.5, 7.5);
                     _log.AppendLine($"Верх выработки: {maxZ_exc:F3}");
 
                     // === НИЗ КАРЬЕРА ===
                     _log.AppendLine("[2] Извлечение карьера...");
                     ed.Command("_.ZOOM", "_W", p1, p3);
-                    System.Threading.Thread.Sleep(100);
+                    ed.Command("_.REGEN");
                     
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", _quarryId, "", "_Y");
+                    ed.SetImpliedSelection(new ObjectId[] { _quarryId });
+                    ExecuteCommandAndWait(doc, "_.NPC_EXTRACT_FROM_VIEW _N \n");
                     
                     ObjectId quarryCloudId = FindLastCloud(tr);
                     if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", quarryCloudId);
                     
-                    // Ищем минимум (низ)
                     double minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5);
                     _log.AppendLine($"Низ карьера: {minZ_quarry:F3}");
 
@@ -243,10 +243,27 @@ namespace MiningCalc
             }
         }
 
+        // --- ВСПОМОГАТЕЛЬНЫЙ МЕТОД ОЖИДАНИЯ КОМАНДЫ ---
+        private void ExecuteCommandAndWait(Document doc, string command)
+        {
+            bool finished = false;
+            EventHandler handler = (s, e) => { finished = true; };
+            
+            doc.CommandEnded += handler;
+            doc.SendStringToExecute(command, true, false, false);
+            
+            DateTime start = DateTime.Now;
+            while (!finished && (DateTime.Now - start).TotalSeconds < 5) // Ждем максимум 5 секунд
+            {
+                System.Windows.Forms.Application.DoEvents();
+                System.Threading.Thread.Sleep(50);
+            }
+            doc.CommandEnded -= handler;
+        }
+
         private double FindMaxZInBox(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width)
         {
             double maxZ = double.MinValue;
-            // ИСПРАВЛЕНО: Ищем *POINT* (чтобы захватить и POINT, и GEOPOINT)
             TypedValue[] tv = new TypedValue[] { new TypedValue((int)DxfCode.Start, "*POINT*") };
             PromptSelectionResult psr = ed.SelectAll(new SelectionFilter(tv));
             
@@ -257,7 +274,6 @@ namespace MiningCalc
                     var ent = tr.GetObject(so.ObjectId, OpenMode.ForRead);
                     Point3d pos = Point3d.Origin;
                     
-                    // Извлекаем координаты в зависимости от типа
                     if (ent is DBPoint dbPt) pos = dbPt.Position;
                     else
                     {
