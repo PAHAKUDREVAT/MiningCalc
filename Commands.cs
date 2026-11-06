@@ -6,14 +6,12 @@ using System.Windows.Forms;
 using System.Drawing;
 using System.Globalization;
 using System.Text;
-using System.Reflection;
 using HostMgd.ApplicationServices;
 using HostMgd.EditorInput;
 using HostMgd.Windows;
 using Teigha.DatabaseServices;
 using Teigha.Geometry;
 using Teigha.Runtime;
-using laszip.net;
 
 namespace MiningCalc
 {
@@ -37,7 +35,6 @@ namespace MiningCalc
 
     public class SurveyControl : UserControl
     {
-        // Используем null!, чтобы компилятор не ругался на инициализацию (мы делаем это в InitializeUI)
         private Button btnSetQuarry = null!;
         private Button btnSetExc = null!;
         private Button btnSetLine = null!;
@@ -111,12 +108,12 @@ namespace MiningCalc
 
                 _log.Clear();
                 _log.AppendLine("--- НАЧАЛО РАСЧЕТА ---");
-                lblResult.Text = "Чтение файлов (см. лог)...";
+                lblResult.Text = "Обработка...";
                 System.Windows.Forms.Application.DoEvents();
 
                 try
                 {
-                    double minDist = ProcessZoneFromFiles(pprFace.Value);
+                    double minDist = ProcessZoneViaView(pprFace.Value);
                     lblResult.Text = $"РЕЗУЛЬТАТ:\nМин. расстояние:\n{minDist:F2} м.\n\n(Нажмите 'Показать лог')";
                 }
                 catch (System.Exception ex)
@@ -149,14 +146,16 @@ namespace MiningCalc
             logForm.Show();
         }
 
-        private double ProcessZoneFromFiles(Point3d ptClick)
+        private double ProcessZoneViaView(Point3d ptClick)
         {
             Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
             Database db = doc.Database;
 
             Point3d ptOnLine;
             Vector3d vFwd;
 
+            // 1. Определение направления
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 Polyline faceLine = (Polyline)tr.GetObject(_lineId, OpenMode.ForRead);
@@ -173,180 +172,157 @@ namespace MiningCalc
             }
 
             Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0);
+            
+            // Зона 15х20
+            Point3d p1 = ptOnLine + vSide * -7.5;
+            Point3d p2 = ptOnLine + vSide * 7.5;
+            Point3d p3 = p2 + vFwd * 20.0;
+            Point3d p4 = p1 + vFwd * 20.0;
 
-            // --- ПОЛУЧЕНИЕ ПУТЕЙ ---
-            string? pathExc = GetFilePath(_excId);
-            string? pathQuarry = GetFilePath(_quarryId);
+            object oldCmdEcho = HostMgd.ApplicationServices.Application.GetSystemVariable("CMDECHO");
+            HostMgd.ApplicationServices.Application.SetSystemVariable("CMDECHO", 0);
 
-            _log.AppendLine($"Путь Карьера: {pathQuarry}");
-            _log.AppendLine($"Путь Выработки: {pathExc}");
-
-            if (string.IsNullOrEmpty(pathExc) || string.IsNullOrEmpty(pathQuarry))
-                throw new System.Exception("Не удалось прочитать путь к файлам. Проверьте лог.");
-
-            // --- ЧТЕНИЕ ФАЙЛОВ ---
-            _log.AppendLine("Чтение точек...");
-            List<Point3d> qPoints = ReadPointCloudFile(pathQuarry);
-            List<Point3d> ePoints = ReadPointCloudFile(pathExc);
-
-            _log.AppendLine($"Загружено точек: Карьер={qPoints.Count}, Выработка={ePoints.Count}");
-
-            // --- РАСЧЕТ ---
-            double maxZ_exc = double.MinValue;
-            foreach (var pt in ePoints)
-            {
-                Vector3d vec = pt - ptOnLine;
-                if (vec.DotProduct(vFwd) >= 0 && vec.DotProduct(vFwd) <= 0.5 && Math.Abs(vec.DotProduct(vSide)) <= 7.5)
-                    if (pt.Z > maxZ_exc) maxZ_exc = pt.Z;
-            }
-
-            double minZ_quarry = double.MaxValue;
-            foreach (var pt in qPoints)
-            {
-                Vector3d vec = pt - ptOnLine;
-                if (vec.DotProduct(vFwd) >= 0 && vec.DotProduct(vFwd) <= 20.0 && Math.Abs(vec.DotProduct(vSide)) <= 7.5)
-                    if (pt.Z < minZ_quarry) minZ_quarry = pt.Z;
-            }
-
-            _log.AppendLine($"Верх выработки (0.5м): {maxZ_exc:F3}");
-            _log.AppendLine($"Низ карьера (20м): {minZ_quarry:F3}");
-
-            if (maxZ_exc == double.MinValue) throw new System.Exception("Нет точек выработки в зоне 0.5м от забоя.");
-            if (minZ_quarry == double.MaxValue) throw new System.Exception("Нет точек карьера в 20м зоне.");
-
-            double result = 0;
-            if (minZ_quarry > maxZ_exc) result = minZ_quarry - maxZ_exc;
-
-            // Подпись
+            // Начинаем транзакцию для извлечения и расчета
             using (Transaction tr = db.TransactionManager.StartTransaction())
-            {
-                BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
-                DBText text = new DBText();
-                text.Position = ptOnLine + vSide * 2.0 + new Vector3d(0, 0, 1); 
-                text.Height = 1.5;
-                text.TextString = $"H = {result:F2} м";
-                btr.AppendEntity(text);
-                tr.AddNewlyCreatedDBObject(text, true);
-                tr.Commit();
-            }
-
-            return result;
-        }
-
-        // --- ИЗВЛЕЧЕНИЕ ПУТИ БЕЗ ПРЯМОГО КЛАССА PointCloudEx ---
-        private string? GetFilePath(ObjectId id)
-        {
-            Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
-            using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
             {
                 try
                 {
-                    DBObject ent = tr.GetObject(id, OpenMode.ForRead);
+                    // === ВЕРХ ВЫРАБОТКИ ===
+                    _log.AppendLine("[1] Извлечение выработки...");
+                    // Приближаем экран ровно к нашей рамке
+                    ed.Command("_.ZOOM", "_W", p1, p3);
+                    System.Threading.Thread.Sleep(100); // Даем экрану обновиться
+                    
+                    // Извлекаем видимые точки (передаем ID облака, чтобы не спрашивал)
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _excId);
+                    ObjectId excCloudId = FindLastCloud(tr);
+                    if (excCloudId.IsNull) throw new Exception("Не удалось извлечь выработку (возможно, в зоне пусто).");
+                    
+                    // Взрываем извлеченный кусочек
+                    ed.Command("_.NG_EXPLODE_POINTCLOUD", excCloudId);
+                    
+                    // Ищем максимум (верх)
+                    double maxZ_exc = FindMaxZInBox(ed, tr, ptOnLine, vFwd, vSide, 0.5, 7.5);
+                    _log.AppendLine($"Верх выработки: {maxZ_exc:F3}");
 
-                    // 1. Ищем свойство PointCloudDefExId через рефлексию (без указания типа)
-                    ObjectId defId = ObjectId.Null;
-                    PropertyInfo? defIdProp = ent.GetType().GetProperty("PointCloudDefExId");
-                    if (defIdProp == null)
-                        defIdProp = ent.GetType().BaseType?.GetProperty("PointCloudDefExId");
+                    // === НИЗ КАРЬЕРА ===
+                    _log.AppendLine("[2] Извлечение карьера...");
+                    ed.Command("_.ZOOM", "_W", p1, p3);
+                    System.Threading.Thread.Sleep(100);
+                    
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _quarryId);
+                    ObjectId quarryCloudId = FindLastCloud(tr);
+                    if (quarryCloudId.IsNull) throw new Exception("Не удалось извлечь карьер.");
+                    
+                    ed.Command("_.NG_EXPLODE_POINTCLOUD", quarryCloudId);
+                    
+                    // Ищем минимум (низ)
+                    double minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5);
+                    _log.AppendLine($"Низ карьера: {minZ_quarry:F3}");
 
-                    if (defIdProp != null)
-                    {
-                        object? defIdObj = defIdProp.GetValue(ent);
-                        if (defIdObj is ObjectId oid) defId = oid;
-                    }
+                    // === РАСЧЕТ ===
+                    double result = 0;
+                    if (minZ_quarry > maxZ_exc) result = minZ_quarry - maxZ_exc;
+                    
+                    // Подпись
+                    BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+                    DBText text = new DBText();
+                    text.Position = ptOnLine + vSide * 2.0 + new Vector3d(0, 0, 1); 
+                    text.Height = 1.5;
+                    text.TextString = $"H = {result:F2} м";
+                    btr.AppendEntity(text);
+                    tr.AddNewlyCreatedDBObject(text, true);
 
-                    // Если не нашли, пробуем через dynamic (вдруг это скрытый класс)
-                    if (defId.IsNull)
-                    {
-                        try
-                        {
-                            dynamic dynEnt = ent;
-                            object? dynDefId = dynEnt.PointCloudDefExId;
-                            if (dynDefId is ObjectId dOid) defId = dOid;
-                        }
-                        catch { /* Игнорируем */ }
-                    }
-
-                    if (!defId.IsNull)
-                    {
-                        DBObject defEx = tr.GetObject(defId, OpenMode.ForRead);
-                        
-                        // 2. Ищем путь в определении
-                        string[] propNames = { "SourceFileName", "ActiveFileName" };
-                        foreach (var name in propNames)
-                        {
-                            PropertyInfo? pathProp = defEx.GetType().GetProperty(name);
-                            if (pathProp != null)
-                            {
-                                string? path = pathProp.GetValue(defEx) as string;
-                                if (!string.IsNullOrEmpty(path)) return path;
-                            }
-                        }
-                    }
-
-                    // 3. Запасной вариант: прямое свойство Path
-                    PropertyInfo? directPathProp = ent.GetType().GetProperty("Path");
-                    if (directPathProp != null)
-                    {
-                        string? directPath = directPathProp.GetValue(ent) as string;
-                        if (!string.IsNullOrEmpty(directPath)) return directPath;
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    _log.AppendLine($"[GetFilePath] Ошибка: {ex.Message}");
+                    return result;
                 }
                 finally
                 {
-                    tr.Commit();
+                    HostMgd.ApplicationServices.Application.SetSystemVariable("CMDECHO", oldCmdEcho);
+                    ed.Command("_.ZOOM", "_P"); // Возвращаем вид
+                    Cleanup(tr); // Удаляем мусор
                 }
             }
-            return null;
         }
 
-        private List<Point3d> ReadPointCloudFile(string path)
+        private double FindMaxZInBox(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width)
         {
-            var pts = new List<Point3d>();
-            if (!File.Exists(path)) throw new System.Exception($"Файл не найден: {path}");
-
-            if (path.EndsWith(".las", StringComparison.OrdinalIgnoreCase))
+            double maxZ = double.MinValue;
+            TypedValue[] tv = new TypedValue[] { new TypedValue((int)DxfCode.Start, "POINT") };
+            PromptSelectionResult psr = ed.SelectAll(new SelectionFilter(tv));
+            
+            if (psr.Status == PromptStatus.OK)
             {
-                var laszip = new laszip_dll();
-                bool isCompressed = false;
-                if (laszip.laszip_open_reader(path, ref isCompressed) != 0) throw new System.Exception("Ошибка открытия LAS.");
-
-                var header = laszip.header;
-                long pointCount = header.number_of_point_records;
-
-                for (long i = 0; i < pointCount; i++)
+                foreach (SelectedObject so in psr.Value)
                 {
-                    laszip.laszip_read_point();
-                    double x = laszip.point.X * header.x_scale_factor + header.x_offset;
-                    double y = laszip.point.Y * header.y_scale_factor + header.y_offset;
-                    double z = laszip.point.Z * header.z_scale_factor + header.z_offset;
-                    pts.Add(new Point3d(x, y, z));
-                }
-                laszip.laszip_close_reader();
-            }
-            else if (path.EndsWith(".txt") || path.EndsWith(".xyz") || path.EndsWith(".csv"))
-            {
-                foreach (var line in File.ReadLines(path))
-                {
-                    var parts = line.Split(new[] { ',', ';', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length >= 3 && double.TryParse(parts[0], NumberStyles.Any, CultureInfo.InvariantCulture, out double x) &&
-                        double.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out double y) &&
-                        double.TryParse(parts[2], NumberStyles.Any, CultureInfo.InvariantCulture, out double z))
+                    var pt = tr.GetObject(so.ObjectId, OpenMode.ForRead) as DBPoint;
+                    if (pt != null)
                     {
-                        pts.Add(new Point3d(x, y, z));
+                        Vector3d vec = pt.Position - ptOnLine;
+                        if (vec.DotProduct(vFwd) >= 0 && vec.DotProduct(vFwd) <= depth && Math.Abs(vec.DotProduct(vSide)) <= width)
+                        {
+                            if (pt.Position.Z > maxZ) maxZ = pt.Position.Z;
+                        }
                     }
                 }
             }
-            else
-            {
-                throw new System.Exception($"Формат файла {Path.GetExtension(path)} не поддерживается. Нужен LAS или TXT/CSV.");
-            }
+            return maxZ;
+        }
 
-            return pts;
+        private double FindMinZInBox(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width)
+        {
+            double minZ = double.MaxValue;
+            TypedValue[] tv = new TypedValue[] { new TypedValue((int)DxfCode.Start, "POINT") };
+            PromptSelectionResult psr = ed.SelectAll(new SelectionFilter(tv));
+            
+            if (psr.Status == PromptStatus.OK)
+            {
+                foreach (SelectedObject so in psr.Value)
+                {
+                    var pt = tr.GetObject(so.ObjectId, OpenMode.ForRead) as DBPoint;
+                    if (pt != null)
+                    {
+                        Vector3d vec = pt.Position - ptOnLine;
+                        if (vec.DotProduct(vFwd) >= 0 && vec.DotProduct(vFwd) <= depth && Math.Abs(vec.DotProduct(vSide)) <= width)
+                        {
+                            if (pt.Position.Z < minZ) minZ = pt.Position.Z;
+                        }
+                    }
+                }
+            }
+            return minZ;
+        }
+
+        private ObjectId FindLastCloud(Transaction tr)
+        {
+            Database db = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Database;
+            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
+            ObjectId lastId = ObjectId.Null;
+            long maxHandle = -1;
+            foreach (ObjectId id in btr)
+            {
+                var ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
+                if (ent != null && ent.GetType().Name.Contains("PointCloud") && ent.Handle.Value > maxHandle)
+                {
+                    maxHandle = ent.Handle.Value;
+                    lastId = id;
+                }
+            }
+            return lastId;
+        }
+
+        private void Cleanup(Transaction tr)
+        {
+            Database db = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Database;
+            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+            foreach (ObjectId id in btr)
+            {
+                var ent = tr.GetObject(id, OpenMode.ForWrite) as Entity;
+                // Удаляем только то, что не является нашими исходными объектами
+                if (ent != null && (ent.GetType().Name.Contains("PointCloud") || ent is DBPoint) && id != _quarryId && id != _excId && id != _lineId)
+                {
+                    ent.Erase();
+                }
+            }
         }
     }
 }
