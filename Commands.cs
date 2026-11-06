@@ -243,11 +243,12 @@ namespace MiningCalc
             }
         }
 
-        // --- ВСПОМОГАТЕЛЬНЫЙ МЕТОД ОЖИДАНИЯ КОМАНДЫ ---
+        // --- ИСПРАВЛЕННЫЙ МЕТОД ОЖИДАНИЯ КОМАНДЫ ---
         private void ExecuteCommandAndWait(Document doc, string command)
         {
             bool finished = false;
-            EventHandler handler = (s, e) => { finished = true; };
+            // ИСПОЛЬЗУЕМ CommandEventHandler ВМЕСТО EventHandler
+            CommandEventHandler handler = (s, e) => { finished = true; };
             
             doc.CommandEnded += handler;
             doc.SendStringToExecute(command, true, false, false);
