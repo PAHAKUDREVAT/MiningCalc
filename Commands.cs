@@ -116,7 +116,7 @@ namespace MiningCalc
                     double minDist = ProcessZoneViaView(pprFace.Value);
                     lblResult.Text = $"РЕЗУЛЬТАТ:\nМин. расстояние:\n{minDist:F2} м.\n\n(Нажмите 'Показать лог')";
                 }
-                catch (System.Exception ex) // Исправлено на System.Exception
+                catch (System.Exception ex)
                 {
                     _log.AppendLine($"КРИТИЧЕСКАЯ ОШИБКА: {ex.Message}");
                     lblResult.Text = "Ошибка! Смотрите лог.";
@@ -189,14 +189,17 @@ namespace MiningCalc
                     // === ВЕРХ ВЫРАБОТКИ ===
                     _log.AppendLine("[1] Извлечение выработки...");
                     ed.Command("_.ZOOM", "_W", p1, p3);
-                    System.Threading.Thread.Sleep(100);
+                    System.Threading.Thread.Sleep(100); // Даем камере обновиться
                     
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _excId);
+                    // ИСПРАВЛЕНО: Передаем ID, подтверждаем выбор, и говорим _Y (использовать все видимые)
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", _excId, "", "_Y");
+                    
                     ObjectId excCloudId = FindLastCloud(tr);
-                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку (возможно, в зоне пусто)."); // Исправлено
+                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку (возможно, в зоне пусто).");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", excCloudId);
                     
+                    // Ищем максимум (верх)
                     double maxZ_exc = FindMaxZInBox(ed, tr, ptOnLine, vFwd, vSide, 0.5, 7.5);
                     _log.AppendLine($"Верх выработки: {maxZ_exc:F3}");
 
@@ -205,12 +208,14 @@ namespace MiningCalc
                     ed.Command("_.ZOOM", "_W", p1, p3);
                     System.Threading.Thread.Sleep(100);
                     
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _quarryId);
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", _quarryId, "", "_Y");
+                    
                     ObjectId quarryCloudId = FindLastCloud(tr);
-                    if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер."); // Исправлено
+                    if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", quarryCloudId);
                     
+                    // Ищем минимум (низ)
                     double minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5);
                     _log.AppendLine($"Низ карьера: {minZ_quarry:F3}");
 
@@ -218,6 +223,7 @@ namespace MiningCalc
                     double result = 0;
                     if (minZ_quarry > maxZ_exc) result = minZ_quarry - maxZ_exc;
                     
+                    // Подпись
                     BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
                     DBText text = new DBText();
                     text.Position = ptOnLine + vSide * 2.0 + new Vector3d(0, 0, 1); 
@@ -240,20 +246,31 @@ namespace MiningCalc
         private double FindMaxZInBox(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width)
         {
             double maxZ = double.MinValue;
-            TypedValue[] tv = new TypedValue[] { new TypedValue((int)DxfCode.Start, "POINT") };
+            // ИСПРАВЛЕНО: Ищем *POINT* (чтобы захватить и POINT, и GEOPOINT)
+            TypedValue[] tv = new TypedValue[] { new TypedValue((int)DxfCode.Start, "*POINT*") };
             PromptSelectionResult psr = ed.SelectAll(new SelectionFilter(tv));
             
             if (psr.Status == PromptStatus.OK)
             {
                 foreach (SelectedObject so in psr.Value)
                 {
-                    var pt = tr.GetObject(so.ObjectId, OpenMode.ForRead) as DBPoint;
-                    if (pt != null)
+                    var ent = tr.GetObject(so.ObjectId, OpenMode.ForRead);
+                    Point3d pos = Point3d.Origin;
+                    
+                    // Извлекаем координаты в зависимости от типа
+                    if (ent is DBPoint dbPt) pos = dbPt.Position;
+                    else
                     {
-                        Vector3d vec = pt.Position - ptOnLine;
+                        var posProp = ent.GetType().GetProperty("Position");
+                        if (posProp != null && posProp.GetValue(ent) is Point3d p) pos = p;
+                    }
+
+                    if (pos != Point3d.Origin)
+                    {
+                        Vector3d vec = pos - ptOnLine;
                         if (vec.DotProduct(vFwd) >= 0 && vec.DotProduct(vFwd) <= depth && Math.Abs(vec.DotProduct(vSide)) <= width)
                         {
-                            if (pt.Position.Z > maxZ) maxZ = pt.Position.Z;
+                            if (pos.Z > maxZ) maxZ = pos.Z;
                         }
                     }
                 }
@@ -264,20 +281,29 @@ namespace MiningCalc
         private double FindMinZInBox(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width)
         {
             double minZ = double.MaxValue;
-            TypedValue[] tv = new TypedValue[] { new TypedValue((int)DxfCode.Start, "POINT") };
+            TypedValue[] tv = new TypedValue[] { new TypedValue((int)DxfCode.Start, "*POINT*") };
             PromptSelectionResult psr = ed.SelectAll(new SelectionFilter(tv));
             
             if (psr.Status == PromptStatus.OK)
             {
                 foreach (SelectedObject so in psr.Value)
                 {
-                    var pt = tr.GetObject(so.ObjectId, OpenMode.ForRead) as DBPoint;
-                    if (pt != null)
+                    var ent = tr.GetObject(so.ObjectId, OpenMode.ForRead);
+                    Point3d pos = Point3d.Origin;
+                    
+                    if (ent is DBPoint dbPt) pos = dbPt.Position;
+                    else
                     {
-                        Vector3d vec = pt.Position - ptOnLine;
+                        var posProp = ent.GetType().GetProperty("Position");
+                        if (posProp != null && posProp.GetValue(ent) is Point3d p) pos = p;
+                    }
+
+                    if (pos != Point3d.Origin)
+                    {
+                        Vector3d vec = pos - ptOnLine;
                         if (vec.DotProduct(vFwd) >= 0 && vec.DotProduct(vFwd) <= depth && Math.Abs(vec.DotProduct(vSide)) <= width)
                         {
-                            if (pt.Position.Z < minZ) minZ = pt.Position.Z;
+                            if (pos.Z < minZ) minZ = pos.Z;
                         }
                     }
                 }
@@ -310,7 +336,7 @@ namespace MiningCalc
             foreach (ObjectId id in btr)
             {
                 var ent = tr.GetObject(id, OpenMode.ForWrite) as Entity;
-                if (ent != null && (ent.GetType().Name.Contains("PointCloud") || ent is DBPoint) && id != _quarryId && id != _excId && id != _lineId)
+                if (ent != null && (ent.GetType().Name.Contains("PointCloud") || ent.GetType().Name.Contains("POINT")) && id != _quarryId && id != _excId && id != _lineId)
                 {
                     ent.Erase();
                 }
