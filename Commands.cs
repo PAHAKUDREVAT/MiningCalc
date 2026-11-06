@@ -190,13 +190,11 @@ namespace MiningCalc
                     ed.Command("_.ZOOM", "_W", p1, p3);
                     ed.Command("_.REGEN");
                     
-                    ed.SetImpliedSelection(new ObjectId[] { _excId });
+                    // Передаем _N (Нет всем), ID облака, и "" (Enter для подтверждения выбора)
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _excId, "");
                     
-                    // Безопасный вызов команды с ожиданием завершения
-                    ExecuteCommandAndWait(doc, "_.NPC_EXTRACT_FROM_VIEW _N \n");
-                    
-                    ObjectId excCloudId = FindLastCloud(tr);
-                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку (возможно, в зоне пусто).");
+                    ObjectId excCloudId = FindNewCloud(tr, _excId);
+                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку. Возможно, в рамке 15х20 нет точек или облако обрезано.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", excCloudId);
                     
@@ -208,10 +206,9 @@ namespace MiningCalc
                     ed.Command("_.ZOOM", "_W", p1, p3);
                     ed.Command("_.REGEN");
                     
-                    ed.SetImpliedSelection(new ObjectId[] { _quarryId });
-                    ExecuteCommandAndWait(doc, "_.NPC_EXTRACT_FROM_VIEW _N \n");
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _quarryId, "");
                     
-                    ObjectId quarryCloudId = FindLastCloud(tr);
+                    ObjectId quarryCloudId = FindNewCloud(tr, _quarryId);
                     if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", quarryCloudId);
@@ -243,23 +240,27 @@ namespace MiningCalc
             }
         }
 
-        // --- ИСПРАВЛЕННЫЙ МЕТОД ОЖИДАНИЯ КОМАНДЫ ---
-        private void ExecuteCommandAndWait(Document doc, string command)
+        // Поиск именно НОВОГО облака, которое не является исходным
+        private ObjectId FindNewCloud(Transaction tr, ObjectId originalId)
         {
-            bool finished = false;
-            // ИСПОЛЬЗУЕМ CommandEventHandler ВМЕСТО EventHandler
-            CommandEventHandler handler = (s, e) => { finished = true; };
+            Database db = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Database;
+            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
+            ObjectId lastId = ObjectId.Null;
+            long maxHandle = -1;
             
-            doc.CommandEnded += handler;
-            doc.SendStringToExecute(command, true, false, false);
-            
-            DateTime start = DateTime.Now;
-            while (!finished && (DateTime.Now - start).TotalSeconds < 5) // Ждем максимум 5 секунд
+            foreach (ObjectId id in btr)
             {
-                System.Windows.Forms.Application.DoEvents();
-                System.Threading.Thread.Sleep(50);
+                var ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
+                if (ent != null && ent.GetType().Name.Contains("PointCloud") && id != originalId && id != _quarryId && id != _excId)
+                {
+                    if (ent.Handle.Value > maxHandle)
+                    {
+                        maxHandle = ent.Handle.Value;
+                        lastId = id;
+                    }
+                }
             }
-            doc.CommandEnded -= handler;
+            return lastId;
         }
 
         private double FindMaxZInBox(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width)
@@ -326,24 +327,6 @@ namespace MiningCalc
                 }
             }
             return minZ;
-        }
-
-        private ObjectId FindLastCloud(Transaction tr)
-        {
-            Database db = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Database;
-            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
-            ObjectId lastId = ObjectId.Null;
-            long maxHandle = -1;
-            foreach (ObjectId id in btr)
-            {
-                var ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
-                if (ent != null && ent.GetType().Name.Contains("PointCloud") && ent.Handle.Value > maxHandle)
-                {
-                    maxHandle = ent.Handle.Value;
-                    lastId = id;
-                }
-            }
-            return lastId;
         }
 
         private void Cleanup(Transaction tr)
