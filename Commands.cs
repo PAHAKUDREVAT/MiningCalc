@@ -116,7 +116,7 @@ namespace MiningCalc
                     double minDist = ProcessZoneViaView(pprFace.Value);
                     lblResult.Text = $"РЕЗУЛЬТАТ:\nМин. расстояние:\n{minDist:F2} м.\n\n(Нажмите 'Показать лог')";
                 }
-                catch (System.Exception ex)
+                catch (System.Exception ex) // Исправлено на System.Exception
                 {
                     _log.AppendLine($"КРИТИЧЕСКАЯ ОШИБКА: {ex.Message}");
                     lblResult.Text = "Ошибка! Смотрите лог.";
@@ -182,26 +182,21 @@ namespace MiningCalc
             object oldCmdEcho = HostMgd.ApplicationServices.Application.GetSystemVariable("CMDECHO");
             HostMgd.ApplicationServices.Application.SetSystemVariable("CMDECHO", 0);
 
-            // Начинаем транзакцию для извлечения и расчета
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 try
                 {
                     // === ВЕРХ ВЫРАБОТКИ ===
                     _log.AppendLine("[1] Извлечение выработки...");
-                    // Приближаем экран ровно к нашей рамке
                     ed.Command("_.ZOOM", "_W", p1, p3);
-                    System.Threading.Thread.Sleep(100); // Даем экрану обновиться
+                    System.Threading.Thread.Sleep(100);
                     
-                    // Извлекаем видимые точки (передаем ID облака, чтобы не спрашивал)
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _excId);
                     ObjectId excCloudId = FindLastCloud(tr);
-                    if (excCloudId.IsNull) throw new Exception("Не удалось извлечь выработку (возможно, в зоне пусто).");
+                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку (возможно, в зоне пусто)."); // Исправлено
                     
-                    // Взрываем извлеченный кусочек
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", excCloudId);
                     
-                    // Ищем максимум (верх)
                     double maxZ_exc = FindMaxZInBox(ed, tr, ptOnLine, vFwd, vSide, 0.5, 7.5);
                     _log.AppendLine($"Верх выработки: {maxZ_exc:F3}");
 
@@ -212,11 +207,10 @@ namespace MiningCalc
                     
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _quarryId);
                     ObjectId quarryCloudId = FindLastCloud(tr);
-                    if (quarryCloudId.IsNull) throw new Exception("Не удалось извлечь карьер.");
+                    if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер."); // Исправлено
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", quarryCloudId);
                     
-                    // Ищем минимум (низ)
                     double minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5);
                     _log.AppendLine($"Низ карьера: {minZ_quarry:F3}");
 
@@ -224,7 +218,6 @@ namespace MiningCalc
                     double result = 0;
                     if (minZ_quarry > maxZ_exc) result = minZ_quarry - maxZ_exc;
                     
-                    // Подпись
                     BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
                     DBText text = new DBText();
                     text.Position = ptOnLine + vSide * 2.0 + new Vector3d(0, 0, 1); 
@@ -238,8 +231,8 @@ namespace MiningCalc
                 finally
                 {
                     HostMgd.ApplicationServices.Application.SetSystemVariable("CMDECHO", oldCmdEcho);
-                    ed.Command("_.ZOOM", "_P"); // Возвращаем вид
-                    Cleanup(tr); // Удаляем мусор
+                    ed.Command("_.ZOOM", "_P");
+                    Cleanup(tr);
                 }
             }
         }
@@ -317,7 +310,6 @@ namespace MiningCalc
             foreach (ObjectId id in btr)
             {
                 var ent = tr.GetObject(id, OpenMode.ForWrite) as Entity;
-                // Удаляем только то, что не является нашими исходными объектами
                 if (ent != null && (ent.GetType().Name.Contains("PointCloud") || ent is DBPoint) && id != _quarryId && id != _excId && id != _lineId)
                 {
                     ent.Erase();
