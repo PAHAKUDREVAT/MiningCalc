@@ -171,54 +171,62 @@ namespace MiningCalc
             }
 
             Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0);
-            
-            // Зона 15х20
-            Point3d p1 = ptOnLine + vSide * -7.5;
-            Point3d p2 = ptOnLine + vSide * 7.5;
-            Point3d p3 = p2 + vFwd * 20.0;
-            Point3d p4 = p1 + vFwd * 20.0;
 
             object oldCmdEcho = HostMgd.ApplicationServices.Application.GetSystemVariable("CMDECHO");
             HostMgd.ApplicationServices.Application.SetSystemVariable("CMDECHO", 0);
+
+            double maxZ_exc = double.MinValue;
+            double minZ_quarry = double.MaxValue;
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 try
                 {
-                    // === ВЕРХ ВЫРАБОТКИ ===
-                    _log.AppendLine("[1] Извлечение выработки...");
-                    ed.Command("_.ZOOM", "_W", p1, p3);
+                    // === 1. ИЗВЛЕКАЕМ ВЫРАБОТКУ (УЗКАЯ ПОЛОСА ВОКРУГ ЛИНИИ) ===
+                    _log.AppendLine("[1] Поиск ближайшей точки выработки к линии забоя...");
+                    // Делаем рамку шириной 15м, но по длине всего от -2м до +2м от линии
+                    Point3d ep1 = ptOnLine - vFwd * 2.0 + vSide * -7.5;
+                    Point3d ep2 = ptOnLine - vFwd * 2.0 + vSide * 7.5;
+                    Point3d ep3 = ptOnLine + vFwd * 2.0 + vSide * 7.5;
+                    Point3d ep4 = ptOnLine + vFwd * 2.0 + vSide * -7.5;
+
+                    ed.Command("_.ZOOM", "_W", ep1, ep3);
                     ed.Command("_.REGEN");
                     
-                    // Передаем _N (Нет всем), ID облака, и "" (Enter для подтверждения выбора)
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _excId, "");
-                    
-                    ObjectId excCloudId = FindNewCloud(tr, _excId);
-                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку. Возможно, в рамке 15х20 нет точек или облако обрезано.");
+                    ObjectId excCloudId = FindNewCloud(tr);
+                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку. Возможно, облако обрезано.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", excCloudId);
-                    
-                    double maxZ_exc = FindMaxZInBox(ed, tr, ptOnLine, vFwd, vSide, 0.5, 7.5);
-                    _log.AppendLine($"Верх выработки: {maxZ_exc:F3}");
+                    maxZ_exc = FindClosestPointZ(ed, tr, ptOnLine);
+                    _log.AppendLine($"Отметка выработки (в ближайшей точке): {maxZ_exc:F3}");
 
-                    // === НИЗ КАРЬЕРА ===
-                    _log.AppendLine("[2] Извлечение карьера...");
-                    ed.Command("_.ZOOM", "_W", p1, p3);
+                    // === 2. ИЗВЛЕКАЕМ КАРЬЕР (ЗОНА 20М) ===
+                    _log.AppendLine("[2] Поиск низа карьера в 20м зоне...");
+                    Point3d qp1 = ptOnLine + vSide * -7.5;
+                    Point3d qp2 = ptOnLine + vSide * 7.5;
+                    Point3d qp3 = ptOnLine + vFwd * 20.0 + vSide * 7.5;
+                    Point3d qp4 = ptOnLine + vFwd * 20.0 + vSide * -7.5;
+
+                    ed.Command("_.ZOOM", "_W", qp1, qp3);
                     ed.Command("_.REGEN");
                     
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _quarryId, "");
-                    
-                    ObjectId quarryCloudId = FindNewCloud(tr, _quarryId);
+                    ObjectId quarryCloudId = FindNewCloud(tr);
                     if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", quarryCloudId);
-                    
-                    double minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5);
+                    minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5);
                     _log.AppendLine($"Низ карьера: {minZ_quarry:F3}");
 
                     // === РАСЧЕТ ===
+                    if (maxZ_exc == double.MinValue) throw new System.Exception("В выработке не найдено точек.");
+                    if (minZ_quarry == double.MaxValue) throw new System.Exception("В карьере не найдено точек.");
+
                     double result = 0;
                     if (minZ_quarry > maxZ_exc) result = minZ_quarry - maxZ_exc;
+                    
+                    _log.AppendLine($"Расчет: {minZ_quarry:F3} - ({maxZ_exc:F3}) = {result:F3}");
                     
                     // Подпись
                     BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
@@ -240,32 +248,12 @@ namespace MiningCalc
             }
         }
 
-        // Поиск именно НОВОГО облака, которое не является исходным
-        private ObjectId FindNewCloud(Transaction tr, ObjectId originalId)
+        // Поиск Z-координаты точки, ближайшей к ptOnLine в плане (XY)
+        private double FindClosestPointZ(Editor ed, Transaction tr, Point3d ptOnLine)
         {
-            Database db = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Database;
-            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
-            ObjectId lastId = ObjectId.Null;
-            long maxHandle = -1;
-            
-            foreach (ObjectId id in btr)
-            {
-                var ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
-                if (ent != null && ent.GetType().Name.Contains("PointCloud") && id != originalId && id != _quarryId && id != _excId)
-                {
-                    if (ent.Handle.Value > maxHandle)
-                    {
-                        maxHandle = ent.Handle.Value;
-                        lastId = id;
-                    }
-                }
-            }
-            return lastId;
-        }
+            double bestZ = double.MinValue;
+            double minDist = double.MaxValue;
 
-        private double FindMaxZInBox(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width)
-        {
-            double maxZ = double.MinValue;
             TypedValue[] tv = new TypedValue[] { new TypedValue((int)DxfCode.Start, "*POINT*") };
             PromptSelectionResult psr = ed.SelectAll(new SelectionFilter(tv));
             
@@ -285,15 +273,18 @@ namespace MiningCalc
 
                     if (pos != Point3d.Origin)
                     {
-                        Vector3d vec = pos - ptOnLine;
-                        if (vec.DotProduct(vFwd) >= 0 && vec.DotProduct(vFwd) <= depth && Math.Abs(vec.DotProduct(vSide)) <= width)
+                        // Расстояние только в плане (игнорируем Z)
+                        double dist2D = Math.Sqrt(Math.Pow(pos.X - ptOnLine.X, 2) + Math.Pow(pos.Y - ptOnLine.Y, 2));
+                        
+                        if (dist2D < minDist)
                         {
-                            if (pos.Z > maxZ) maxZ = pos.Z;
+                            minDist = dist2D;
+                            bestZ = pos.Z;
                         }
                     }
                 }
             }
-            return maxZ;
+            return bestZ;
         }
 
         private double FindMinZInBox(Editor ed, Transaction tr, Point3d ptOnLine, Vector3d vFwd, Vector3d vSide, double depth, double width)
@@ -327,6 +318,28 @@ namespace MiningCalc
                 }
             }
             return minZ;
+        }
+
+        private ObjectId FindNewCloud(Transaction tr)
+        {
+            Database db = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Database;
+            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
+            ObjectId lastId = ObjectId.Null;
+            long maxHandle = -1;
+            
+            foreach (ObjectId id in btr)
+            {
+                var ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
+                if (ent != null && ent.GetType().Name.Contains("PointCloud") && id != _quarryId && id != _excId)
+                {
+                    if (ent.Handle.Value > maxHandle)
+                    {
+                        maxHandle = ent.Handle.Value;
+                        lastId = id;
+                    }
+                }
+            }
+            return lastId;
         }
 
         private void Cleanup(Transaction tr)
