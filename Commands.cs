@@ -113,7 +113,7 @@ namespace MiningCalc
 
                 try
                 {
-                    double minDist = ProcessZoneViaView(pprFace.Value);
+                    double minDist = ProcessZone(pprFace.Value);
                     lblResult.Text = $"РЕЗУЛЬТАТ:\nМин. расстояние:\n{minDist:F2} м.\n\n(Нажмите 'Показать лог')";
                 }
                 catch (System.Exception ex)
@@ -146,7 +146,7 @@ namespace MiningCalc
             logForm.Show();
         }
 
-        private double ProcessZoneViaView(Point3d ptClick)
+        private double ProcessZone(Point3d ptClick)
         {
             Document doc = HostMgd.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
@@ -155,6 +155,7 @@ namespace MiningCalc
             Point3d ptOnLine;
             Vector3d vFwd;
 
+            // 1. Определяем направление
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 Polyline faceLine = (Polyline)tr.GetObject(_lineId, OpenMode.ForRead);
@@ -164,13 +165,28 @@ namespace MiningCalc
                 vFwd = new Vector3d(-tangent.Y, tangent.X, 0);
 
                 Entity excEnt = (Entity)tr.GetObject(_excId, OpenMode.ForRead);
-                Point3d excCenter = excEnt.GeometricExtents.MinPoint + (excEnt.GeometricExtents.MaxPoint - excEnt.GeometricExtents.MinPoint) / 2.0;
-                if (vFwd.DotProduct(excCenter - ptOnLine) < 0) vFwd = -vFwd;
+                Extents3d excExt = excEnt.GeometricExtents;
+                Point3d testPt = ptOnLine + vFwd * 5.0;
+                
+                // Если точка в 5 метрах от забоя не попадает в габариты выработки, значит мы смотрим не туда
+                bool inside = (testPt.X >= excExt.MinPoint.X && testPt.X <= excExt.MaxPoint.X &&
+                               testPt.Y >= excExt.MinPoint.Y && testPt.Y <= excExt.MaxPoint.Y);
+
+                if (!inside)
+                {
+                    vFwd = -vFwd;
+                }
 
                 tr.Commit();
             }
 
             Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0);
+            
+            // ОДНА общая зона 15х20 метров
+            Point3d p1 = ptOnLine + vSide * -7.5;
+            Point3d p2 = ptOnLine + vSide * 7.5;
+            Point3d p3 = p2 + vFwd * 20.0;
+            Point3d p4 = p1 + vFwd * 20.0;
 
             object oldCmdEcho = HostMgd.ApplicationServices.Application.GetSystemVariable("CMDECHO");
             HostMgd.ApplicationServices.Application.SetSystemVariable("CMDECHO", 0);
@@ -182,33 +198,26 @@ namespace MiningCalc
             {
                 try
                 {
-                    // === 1. ИЗВЛЕКАЕМ ВЫРАБОТКУ (УЗКАЯ ПОЛОСА ВОКРУГ ЛИНИИ) ===
-                    _log.AppendLine("[1] Поиск ближайшей точки выработки к линии забоя...");
-                    // Делаем рамку шириной 15м, но по длине всего от -2м до +2м от линии
-                    Point3d ep1 = ptOnLine - vFwd * 2.0 + vSide * -7.5;
-                    Point3d ep2 = ptOnLine - vFwd * 2.0 + vSide * 7.5;
-                    Point3d ep3 = ptOnLine + vFwd * 2.0 + vSide * 7.5;
-                    Point3d ep4 = ptOnLine + vFwd * 2.0 + vSide * -7.5;
-
-                    ed.Command("_.ZOOM", "_W", ep1, ep3);
+                    // === ИЗВЛЕКАЕМ ВЫРАБОТКУ ===
+                    _log.AppendLine("[1] Извлечение выработки...");
+                    
+                    // ПРИНУДИТЕЛЬНО СТАВИМ ВИД СВЕРХУ (это критично для NPC_EXTRACT_FROM_VIEW)
+                    ed.Command("_.VPOINT", 0, 0, 1);
+                    ed.Command("_.ZOOM", "_W", p1, p3);
                     ed.Command("_.REGEN");
                     
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _excId, "");
                     ObjectId excCloudId = FindNewCloud(tr);
-                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку. Возможно, облако обрезано.");
+                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку. В рамке 15х20 нет точек.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", excCloudId);
-                    maxZ_exc = FindClosestPointZ(ed, tr, ptOnLine);
-                    _log.AppendLine($"Отметка выработки (в ближайшей точке): {maxZ_exc:F3}");
+                    maxZ_exc = FindClosestPointZ(ed, tr, ptOnLine); // Берем точку, ближайшую к забою
+                    _log.AppendLine($"Верх выработки (у забоя): {maxZ_exc:F3}");
 
-                    // === 2. ИЗВЛЕКАЕМ КАРЬЕР (ЗОНА 20М) ===
-                    _log.AppendLine("[2] Поиск низа карьера в 20м зоне...");
-                    Point3d qp1 = ptOnLine + vSide * -7.5;
-                    Point3d qp2 = ptOnLine + vSide * 7.5;
-                    Point3d qp3 = ptOnLine + vFwd * 20.0 + vSide * 7.5;
-                    Point3d qp4 = ptOnLine + vFwd * 20.0 + vSide * -7.5;
-
-                    ed.Command("_.ZOOM", "_W", qp1, qp3);
+                    // === ИЗВЛЕКАЕМ КАРЬЕР ===
+                    _log.AppendLine("[2] Извлечение карьера...");
+                    ed.Command("_.VPOINT", 0, 0, 1);
+                    ed.Command("_.ZOOM", "_W", p1, p3);
                     ed.Command("_.REGEN");
                     
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _quarryId, "");
@@ -216,7 +225,7 @@ namespace MiningCalc
                     if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", quarryCloudId);
-                    minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5);
+                    minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5); // Ищем минимум в 20м
                     _log.AppendLine($"Низ карьера: {minZ_quarry:F3}");
 
                     // === РАСЧЕТ ===
@@ -248,7 +257,6 @@ namespace MiningCalc
             }
         }
 
-        // Поиск Z-координаты точки, ближайшей к ptOnLine в плане (XY)
         private double FindClosestPointZ(Editor ed, Transaction tr, Point3d ptOnLine)
         {
             double bestZ = double.MinValue;
@@ -273,7 +281,7 @@ namespace MiningCalc
 
                     if (pos != Point3d.Origin)
                     {
-                        // Расстояние только в плане (игнорируем Z)
+                        // Ищем ближайшую точку в плане (XY)
                         double dist2D = Math.Sqrt(Math.Pow(pos.X - ptOnLine.X, 2) + Math.Pow(pos.Y - ptOnLine.Y, 2));
                         
                         if (dist2D < minDist)
