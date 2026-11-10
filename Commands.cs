@@ -153,28 +153,36 @@ namespace MiningCalc
             Database db = doc.Database;
 
             Point3d ptOnLine;
-            Vector3d vFwd;
+            Vector3d vToQuarry; // Вектор в пустоту (к карьеру)
+            Vector3d vToExc;    // Вектор в сторону выработки
 
-            // 1. Определяем направление (в пустоту)
+            // 1. Определяем направления
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 Polyline faceLine = (Polyline)tr.GetObject(_lineId, OpenMode.ForRead);
                 ptOnLine = faceLine.GetClosestPointTo(ptClick, false);
                 
                 Vector3d tangent = faceLine.GetFirstDerivative(faceLine.GetParameterAtPoint(ptOnLine)).GetNormal();
-                vFwd = new Vector3d(-tangent.Y, tangent.X, 0);
+                Vector3d normal = new Vector3d(-tangent.Y, tangent.X, 0);
 
-                // Смотрим на центр габаритов карьера, чтобы точно направить ось в пустоту (туда, где карьер)
                 Entity quarryEnt = (Entity)tr.GetObject(_quarryId, OpenMode.ForRead);
                 Point3d qCenter = quarryEnt.GeometricExtents.MinPoint + (quarryEnt.GeometricExtents.MaxPoint - quarryEnt.GeometricExtents.MinPoint) / 2.0;
                 
-                if (vFwd.DotProduct(qCenter - ptOnLine) < 0) 
-                    vFwd = -vFwd;
+                // Направляем ось в сторону карьера
+                if (normal.DotProduct(qCenter - ptOnLine) > 0)
+                {
+                    vToQuarry = normal;
+                }
+                else
+                {
+                    vToQuarry = -normal;
+                }
+                vToExc = -vToQuarry;
 
                 tr.Commit();
             }
 
-            Vector3d vSide = new Vector3d(-vFwd.Y, vFwd.X, 0);
+            Vector3d vSide = new Vector3d(-vToQuarry.Y, vToQuarry.X, 0);
             
             object oldCmdEcho = HostMgd.ApplicationServices.Application.GetSystemVariable("CMDECHO");
             HostMgd.ApplicationServices.Application.SetSystemVariable("CMDECHO", 0);
@@ -187,55 +195,57 @@ namespace MiningCalc
                 try
                 {
                     // ==========================================
-                    // ШАГ 1: ИЗВЛЕКАЕМ ВЫРАБОТКУ (УЗКАЯ ПОЛОСА ВДОЛЬ ЗАБОЯ)
+                    // ШАГ 1: ИЗВЛЕКАЕМ ВЫРАБОТКУ (ЗОНА В СТОРОНУ ОБЛАКА)
                     // ==========================================
-                    _log.AppendLine("[1] Поиск верха выработки (вдоль линии забоя)...");
-                    ed.Command("_.VPOINT", 0, 0, 1); // Вид сверху
+                    _log.AppendLine("[1] Поиск выработки...");
+                    ed.Command("_.VPOINT", 0, 0, 1); // Строго вид сверху
                     
-                    // Рамка вокруг линии забоя: 15м в ширину, и по 3м в обе стороны от линии
-                    Point3d ep1 = ptOnLine - vFwd * 3.0 + vSide * -7.5;
-                    Point3d ep2 = ptOnLine - vFwd * 3.0 + vSide * 7.5;
-                    Point3d ep3 = ptOnLine + vFwd * 3.0 + vSide * 7.5;
-                    Point3d ep4 = ptOnLine + vFwd * 3.0 + vSide * -7.5;
+                    // Строим рамку в сторону выработки (vToExc) на 20 метров
+                    Point3d ep1 = ptOnLine + vToQuarry * 1.0 + vSide * -7.5;
+                    Point3d ep2 = ptOnLine + vToQuarry * 1.0 + vSide * 7.5;
+                    Point3d ep3 = ep2 + vToExc * 20.0;
+                    Point3d ep4 = ep1 + vToExc * 20.0;
 
                     ed.Command("_.ZOOM", "_W", ep1, ep3);
                     ed.Command("_.REGEN");
+                    System.Threading.Thread.Sleep(200); // Даем экрану обновиться
                     
+                    ed.SetImpliedSelection(new ObjectId[] { _excId });
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _excId, "");
-                    System.Threading.Thread.Sleep(500); // Даем время на извлечение
+                    System.Threading.Thread.Sleep(300);
                     
                     ObjectId excCloudId = FindNewCloud(tr);
-                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку. Проверьте, есть ли облако выработки рядом с линией забоя.");
+                    if (excCloudId.IsNull) throw new System.Exception("Не удалось извлечь выработку. Проверьте, есть ли облако выработки в стороне от линии забоя.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", excCloudId);
-                    
-                    // Ищем точку, ближайшую к линии забоя в плане (XY)
                     maxZ_exc = FindClosestPointZ(ed, tr, ptOnLine); 
                     _log.AppendLine($"Верх выработки (у забоя): {maxZ_exc:F3}");
 
                     // ==========================================
-                    // ШАГ 2: ИЗВЛЕКАЕМ КАРЬЕР (ЗОНА 15х20 В ПУСТОТУ)
+                    // ШАГ 2: ИЗВЛЕКАЕМ КАРЬЕР (ЗОНА В ПУСТОТУ)
                     // ==========================================
-                    _log.AppendLine("[2] Поиск низа карьера (в 20м зоне)...");
+                    _log.AppendLine("[2] Поиск карьера...");
                     ed.Command("_.VPOINT", 0, 0, 1);
                     
-                    Point3d qp1 = ptOnLine + vSide * -7.5;
-                    Point3d qp2 = ptOnLine + vSide * 7.5;
-                    Point3d qp3 = ptOnLine + vFwd * 20.0 + vSide * 7.5;
-                    Point3d qp4 = ptOnLine + vFwd * 20.0 + vSide * -7.5;
+                    // Строим рамку в пустоту (vToQuarry) на 20 метров
+                    Point3d qp1 = ptOnLine - vToQuarry * 1.0 + vSide * -7.5;
+                    Point3d qp2 = ptOnLine - vToQuarry * 1.0 + vSide * 7.5;
+                    Point3d qp3 = qp2 + vToQuarry * 20.0;
+                    Point3d qp4 = qp1 + vToQuarry * 20.0;
 
                     ed.Command("_.ZOOM", "_W", qp1, qp3);
                     ed.Command("_.REGEN");
+                    System.Threading.Thread.Sleep(200);
                     
+                    ed.SetImpliedSelection(new ObjectId[] { _quarryId });
                     ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _quarryId, "");
-                    System.Threading.Thread.Sleep(500);
+                    System.Threading.Thread.Sleep(300);
                     
                     ObjectId quarryCloudId = FindNewCloud(tr);
                     if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер. В зоне 20м нет точек.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", quarryCloudId);
-                    
-                    minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5); 
+                    minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vToQuarry, vSide, 20.0, 7.5); 
                     _log.AppendLine($"Низ карьера: {minZ_quarry:F3}");
 
                     // ==========================================
