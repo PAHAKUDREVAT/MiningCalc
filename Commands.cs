@@ -153,9 +153,9 @@ namespace MiningCalc
             Database db = doc.Database;
 
             Point3d ptOnLine;
-            Vector3d vFwd; // Направление в пустоту (к карьеру)
+            Vector3d vFwd;
 
-            // 1. Определяем направление
+            // 1. Определяем направление (в пустоту, к карьеру)
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
                 Polyline faceLine = (Polyline)tr.GetObject(_lineId, OpenMode.ForRead);
@@ -186,12 +186,11 @@ namespace MiningCalc
                 try
                 {
                     // ==========================================
-                    // ШАГ 1: ИЗВЛЕКАЕМ ВЫРАБОТКУ (ЗОНА ВОКРУГ ЗАБОЯ ±5м)
+                    // ШАГ 1: ИЗВЛЕКАЕМ ВЫРАБОТКУ (ЗОНА ±5м ОТ ЗАБОЯ)
                     // ==========================================
                     _log.AppendLine("[1] Поиск выработки...");
                     ed.Command("_.VPOINT", 0, 0, 1); // Вид сверху
                     
-                    // Берем 15м в ширину и 10м в длину (от -5 до +5 от забоя)
                     Point3d ep1 = ptOnLine - vFwd * 5.0 + vSide * -7.5;
                     Point3d ep2 = ptOnLine - vFwd * 5.0 + vSide * 7.5;
                     Point3d ep3 = ptOnLine + vFwd * 5.0 + vSide * 7.5;
@@ -201,7 +200,8 @@ namespace MiningCalc
                     ed.Command("_.REGEN");
                     System.Threading.Thread.Sleep(200);
                     
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _excId, "");
+                    // ГЛАВНОЕ ИСПРАВЛЕНИЕ: Вызываем команду без указания ID, и отвечаем _Y (Да, использовать все видимые)
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_Y");
                     System.Threading.Thread.Sleep(300);
                     
                     ObjectId excCloudId = FindNewCloud(tr);
@@ -212,7 +212,7 @@ namespace MiningCalc
                     _log.AppendLine($"Верх выработки (у забоя): {maxZ_exc:F3}");
 
                     // ==========================================
-                    // ШАГ 2: ИЗВЛЕКАЕМ КАРЬЕР (ЗОНА В ПУСТОТУ 20м)
+                    // ШАГ 2: ИЗВЛЕКАЕМ КАРЬЕР (ЗОНА 20м В ПУСТОТУ)
                     // ==========================================
                     _log.AppendLine("[2] Поиск карьера...");
                     ed.Command("_.VPOINT", 0, 0, 1);
@@ -226,11 +226,12 @@ namespace MiningCalc
                     ed.Command("_.REGEN");
                     System.Threading.Thread.Sleep(200);
                     
-                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_N", _quarryId, "");
+                    // То же самое для карьера
+                    ed.Command("_.NPC_EXTRACT_FROM_VIEW", "_Y");
                     System.Threading.Thread.Sleep(300);
                     
                     ObjectId quarryCloudId = FindNewCloud(tr);
-                    if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер.");
+                    if (quarryCloudId.IsNull) throw new System.Exception("Не удалось извлечь карьер. В зоне 20м нет точек.");
                     
                     ed.Command("_.NG_EXPLODE_POINTCLOUD", quarryCloudId);
                     minZ_quarry = FindMinZInBox(ed, tr, ptOnLine, vFwd, vSide, 20.0, 7.5); 
